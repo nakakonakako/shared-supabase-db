@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -23,6 +24,7 @@ class MigrationHistoryTests(unittest.TestCase):
         self._git("config", "user.name", "Migration test")
         self._git("config", "user.email", "migration-test@example.invalid")
         (self.migrations / "20260101000000_initial.sql").write_text("select 1;\n")
+        self._write_manifest()
         self._git("add", ".")
         self._git("commit", "-m", "fixture")
         self.base = self._git("rev-parse", "HEAD").stdout.strip()
@@ -38,6 +40,13 @@ class MigrationHistoryTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def _write_manifest(self) -> None:
+        lines = []
+        for path in sorted(self.migrations.glob("*.sql")):
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            lines.append(f"{digest}  supabase/migrations/{path.name}")
+        (self.migrations / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
     def _check(self, remote: str, *, base: bool = False, env: dict[str, str] | None = None):
         self.remote.write_text(remote)
@@ -57,6 +66,21 @@ class MigrationHistoryTests(unittest.TestCase):
         if env:
             merged_env.update(env)
         return subprocess.run(command, capture_output=True, text=True, env=merged_env)
+
+    def _immutability_check(self):
+        return subprocess.run(
+            [
+                "python3",
+                str(SCRIPT),
+                "--repo",
+                str(self.repo),
+                "--base-ref",
+                self.base,
+                "--only-immutability",
+            ],
+            capture_output=True,
+            text=True,
+        )
 
     def test_in_sync_history_passes(self) -> None:
         result = self._check("20260101000000\n", base=True)
@@ -119,11 +143,52 @@ class MigrationHistoryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("immutable", result.stderr)
 
+    def test_existing_migration_change_cannot_be_hidden_by_rewriting_manifest(self) -> None:
+        migration = self.migrations / "20260101000000_initial.sql"
+        migration.write_text("select 99;\n")
+        self._write_manifest()
+
+        result = self._immutability_check()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("immutable", result.stderr)
+
+    def test_migration_rename_is_rejected(self) -> None:
+        old_path = self.migrations / "20260101000000_initial.sql"
+        old_path.rename(self.migrations / "20260101000001_renamed.sql")
+        self._write_manifest()
+
+        result = self._immutability_check()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("immutable", result.stderr)
+
     def test_new_migration_is_allowed(self) -> None:
         (self.migrations / "20260201000000_added.sql").write_text("select 2;\n")
+        self._write_manifest()
+        immutable_result = self._immutability_check()
+        self.assertEqual(immutable_result.returncode, 0, immutable_result.stderr)
         result = self._check("20260101000000\n", base=True)
         self.assertEqual(result.returncode, 1)
         self.assertIn("PENDING: 20260201000000", result.stderr)
+
+    def test_new_migration_without_manifest_update_is_rejected(self) -> None:
+        (self.migrations / "20260201000000_added.sql").write_text("select 2;\n")
+
+        result = self._immutability_check()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("manifest does not match", result.stderr)
+
+    def test_checksum_manifest_must_match_current_sql_files(self) -> None:
+        manifest = self.migrations / "SHA256SUMS"
+        manifest.write_text("0" * 64 + "  supabase/migrations/20260101000000_initial.sql\n")
+
+        result = self._immutability_check()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("checksum mismatch", result.stderr)
+
+        manifest.write_text("")
+        result = self._immutability_check()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("manifest does not match", result.stderr)
 
     def test_existing_verifiers_do_not_require_postgres_identity_and_keep_singleton_check(self) -> None:
         diagnostics = SCRIPT.parent.parent / "supabase" / "diagnostics"

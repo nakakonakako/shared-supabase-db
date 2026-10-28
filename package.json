@@ -5,11 +5,12 @@
     "check": "npm run check:migrations && npm run check:python && npm run check:sql && npm run check:secrets",
     "check:migrations": "python3 scripts/check-migrations.py && sha256sum --check supabase/migrations/SHA256SUMS",
     "check:python": "python3 -m unittest discover -s scripts -p 'test_*.py' -v",
-    "check:sql": "find supabase/diagnostics supabase/tests -type f -name '*.sql' -exec test -s {} \\; && bash -n scripts/run-*-sql-tests.sh supabase/tests/ai_quota/test_concurrent_claim.sh",
+    "check:sql": "find supabase/diagnostics supabase/tests -type f -name '*.sql' -exec test -s {} \\; && bash -n scripts/run-*-sql-tests.sh scripts/test-migration-preflight-reader.sh supabase/tests/ai_quota/test_concurrent_claim.sh",
     "check:secrets": "python3 scripts/check-secrets.py",
     "test:sql:ai-quota": "bash scripts/run-ai-quota-sql-tests.sh",
     "test:sql:data-deletion": "bash scripts/run-price-memo-data-deletion-sql-tests.sh",
     "test:sql:private-broadcast": "bash scripts/run-price-memo-private-broadcast-sql-tests.sh",
+    "test:sql:migration-reader": "bash scripts/test-migration-preflight-reader.sh",
     "db:start": "supabase start",
     "db:stop": "supabase stop",
     "db:history:check": "python3 scripts/check-migration-history.py"

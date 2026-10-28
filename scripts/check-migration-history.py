@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import subprocess
 import sys
@@ -62,6 +63,7 @@ def query_remote_versions() -> set[str]:
 
 
 def check_immutable_migrations(repo: Path, base_ref: str) -> None:
+    migrations_dir = repo / "supabase" / "migrations"
     try:
         result = subprocess.run(
             [
@@ -83,10 +85,14 @@ def check_immutable_migrations(repo: Path, base_ref: str) -> None:
     except (OSError, subprocess.SubprocessError):
         raise CheckError("cannot compare migrations with the protected base ref") from None
 
-    changed = [line for line in result.stdout.splitlines() if line and not line.startswith("A\t")]
-    if changed:
+    changed_sql = [
+        line
+        for line in result.stdout.splitlines()
+        if line and line.split("\t", 1)[-1].endswith(".sql") and not line.startswith("A\t")
+    ]
+    if changed_sql:
         raise CheckError(
-            "applied migration files are immutable; only new migration files may be added"
+            "existing migration SQL files are immutable; only new migration files may be added"
         )
 
     untracked = subprocess.run(
@@ -108,6 +114,33 @@ def check_immutable_migrations(repo: Path, base_ref: str) -> None:
     for relative in untracked.stdout.splitlines():
         if not MIGRATION_NAME.fullmatch(Path(relative).name):
             raise CheckError(f"invalid new migration filename: {Path(relative).name}")
+
+    local_versions(migrations_dir)
+    _validate_migration_manifest(migrations_dir)
+
+
+def _validate_migration_manifest(migrations_dir: Path) -> None:
+    manifest_path = migrations_dir / "SHA256SUMS"
+    sql_files = {path.name: path for path in migrations_dir.glob("*.sql")}
+    expected: dict[str, str] = {}
+    try:
+        for line in manifest_path.read_text(encoding="utf-8").splitlines():
+            match = re.fullmatch(r"([0-9a-f]{64})  (supabase/migrations/([^/]+))", line)
+            if match is None:
+                raise ValueError
+            digest, relative, name = match.groups()
+            if relative != f"supabase/migrations/{name}" or name in expected:
+                raise ValueError
+            expected[name] = digest
+    except (OSError, ValueError):
+        raise CheckError("migration checksum manifest is missing or malformed") from None
+
+    if set(expected) != set(sql_files):
+        raise CheckError("migration checksum manifest does not match SQL files")
+    for name, path in sql_files.items():
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if expected[name] != actual:
+            raise CheckError(f"migration checksum mismatch: {name}")
 
 
 def main() -> int:

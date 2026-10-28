@@ -98,3 +98,13 @@ jobs:
       - run: npm run test:sql:private-broadcast
         env:
           PRICE_MEMO_BROADCAST_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/price_memo_private_broadcast_test
+
+  sql-migration-reader:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run test:sql:migration-reader
