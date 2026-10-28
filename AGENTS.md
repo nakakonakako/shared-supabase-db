@@ -4,7 +4,8 @@
 
 - This repository owns shared Supabase migrations, diagnostics, and isolated SQL validation.
 - Do not modify receipt-manager or price-memo from this repository.
-- Do not connect to a hosted Supabase project, run `db push`, or enable a writer workflow unless explicitly authorized in a later task.
+- Do not run `db push`, add a writer workflow, or perform database writes.
+- The only hosted connection allowed here is the manually dispatched, read-only production check in `.github/workflows/production-db-check.yml`, using the dedicated `production-db-check` Environment and `migration_preflight_login` credentials.
 - Never add project credentials, database URLs, service keys, or other secrets to tracked files.
 
 ## Migration safety
@@ -18,8 +19,9 @@
 
 - Run `npm run check` for changes in this repository.
 - SQL suites must use dedicated disposable local PostgreSQL clusters/databases. The AI quota suite creates cluster-wide roles and requires a fresh cluster.
-- CI must not receive Supabase credentials or connect to hosted projects.
-- Keep workflows pull-request-only/read-only until a separate authorization changes this policy.
+- Pull-request CI must not receive Supabase credentials or connect to hosted projects.
+- Keep the production check manual, main-only, read-only, and limited to `contents: read`.
+- Do not assume the `production-db-check` Environment exists. It must be created, restricted to `main`, and configured before the workflow is merged or dispatched.
 
 ## Git
 

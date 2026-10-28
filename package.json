@@ -11,6 +11,7 @@
     "test:sql:data-deletion": "bash scripts/run-price-memo-data-deletion-sql-tests.sh",
     "test:sql:private-broadcast": "bash scripts/run-price-memo-private-broadcast-sql-tests.sh",
     "test:sql:migration-reader": "bash scripts/test-migration-preflight-reader.sh",
+    "test:production-db-check": "python3 -m unittest scripts.test_production_db_check -v",
     "db:start": "supabase start",
     "db:stop": "supabase stop",
     "db:history:check": "python3 scripts/check-migration-history.py"
