@@ -73,13 +73,13 @@ python3 scripts/check-db-contract.py path/to/contract.json
 
 ## 契約原本の取得とSHA固定
 
-契約の取得元はアプリリポジトリ内の契約ファイルとする。shared側で本文を手動複製しない。アプリCIはPR時にはPRの`github.sha`から契約を読み、保護されたデプロイ/Reader jobではデプロイ対象アプリrevisionの契約を読み取る。参照先はbranch/tag名ではなく完全な40桁commit SHAで固定する。
+契約本文はアプリリポジトリ内のファイルを正本とし、shared側には複製しない。shared側の参照は`repository`、`path`、完全な40桁commit SHAで固定し、branch/tag名には追従しない。現在の初期検証revisionは`price-memo`の`9ed2ae9ff1b5d9cac19141ffde41a3321d225051`と`receipt-manager`の`2c6803cdd7dbc31d441c822df23027f2ddc3f6ce`。このSHAは実際の本番稼働revisionを表さない。
 
-shared側がmigration PRで互換性を判定するため、将来`contracts/consumers.json`等の**参照情報のみ**を持つ方式を推奨する。これはrepo、contract path、各稼働アプリrevisionのSHAを記録し、契約本文を含めない。appのproduction revisionと、段階的rolloutでまだ稼働中の旧revisionを両方記録し、すべての参照先で同じ新schemaが合格するまで旧契約を外さない。参照一覧の更新はアプリのdeploy完了後に別PRで行う。
+`scripts/consumer_db_contracts.py`はGitHub公開Commit APIで指定SHAと応答の完全一致を確認し、その後`raw.githubusercontent.com/<repo>/<sha>/<path>`から取得する。トークンや追加Secretは使用しない。取得、SHA確認、UTF-8 JSON decode、v1形式、期待する`app_id`のいずれかが失敗した場合はDB照合へ進まない。契約ファイルはworkflow runnerの一時領域にだけ保存する。
 
-shared CIが別repoを取得する実装時は、receipt-managerとprice-memoのread-only Contents権限だけを持つGitHub App token等を短命化して使う。fork PRにはその資格情報を渡さず、取得できない/固定SHAが見つからない場合はmigration互換チェックを失敗扱いにする。各appの自身のCIは、同一repo checkoutのPR SHAから契約を読み取るため、cross-repo取得資格情報を必要としない。
+`.github/workflows/consumer-db-contract-check.yml`は`workflow_dispatch`専用でmainからのみ実行でき、最新main SHAを確認する。DB接続前のstepで両契約の取得と形式検証を完了し、既存`production-db-check` Environmentの`migration_preflight_login`資格情報を使って各契約を別々のread-only transactionで照合する。結果は契約ごとに`STATIC PASS`、`CONTRACT MISMATCH`、`EXECUTION ERROR`を出し、両方の成功時だけaggregateを成功とする。接続・出力形式・取得・形式の不明結果はfail-closed。migration履歴照合は既存のproduction workflowで独立して扱い、この契約workflowでは実施しない。
 
-現時点では両アプリに契約ファイルも参照一覧もなく、他repo取得も実装していない。実際の契約本文と稼働SHAはアプリ側PRで所有者がコードに照らして確定する。
+PR CIはホストDBやReader資格情報を利用しない。両アプリの契約PR・CIはアプリリポジトリ側の所有範囲とし、shared側workflowは明示された固定revisionのみを検証する。
 
 ## 後方互換性とbreaking change
 

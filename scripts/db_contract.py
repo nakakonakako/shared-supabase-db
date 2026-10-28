@@ -364,13 +364,35 @@ def _policy_check(schema: str, table: str, policy: dict[str, Any]) -> str:
 
 
 def _privilege_check(schema: str, table: str, entry: dict[str, Any], privilege: str, expected: bool) -> str:
-    rel = f"{schema}.{table}"
-    return f"pg_catalog.has_table_privilege({_literal(entry['role'])},{_literal(rel)},{_literal(privilege)}) IS {'TRUE' if expected else 'FALSE'}"
+    granted = f"EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_roles r ON r.rolname={_literal(entry['role'])} WHERE n.nspname={_literal(schema)} AND c.relname={_literal(table)} AND pg_catalog.has_table_privilege(r.oid,c.oid,{_literal(privilege)}))"
+    return f"({granted}) IS {'TRUE' if expected else 'FALSE'}"
+
+
+_TYPE_ALIASES = {
+    "bool": "boolean", "int2": "smallint", "int4": "integer", "int8": "bigint",
+    "float4": "real", "float8": "double precision", "decimal": "numeric",
+    "varchar": "character varying", "varbit": "bit varying",
+}
+
+
+def _function_lookup(signature: str) -> str:
+    qualified_name, raw_types = signature[:-1].split("(", 1)
+    schema, function_name = qualified_name.split(".")
+    argument_types = [item.strip() for item in raw_types.split(",")] if raw_types.strip() else []
+    expected = "ARRAY[" + ",".join(
+        f"{_literal(_TYPE_ALIASES.get(item, item))}::text" for item in argument_types
+    ) + "]::text[]"
+    return f"""(SELECT p.oid FROM pg_catalog.pg_proc p
+      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname={_literal(schema)} AND p.proname={_literal(function_name)}
+        AND ARRAY(SELECT pg_catalog.format_type(input_type.oid,NULL)
+                 FROM unnest(p.proargtypes::oid[]) WITH ORDINALITY AS input_type(oid,ord)
+                 ORDER BY input_type.ord) IS NOT DISTINCT FROM {expected})"""
 
 
 def _function_check(spec: dict[str, Any]) -> list[tuple[str, str]]:
     signature = spec["signature"]
-    fn = f"pg_catalog.to_regprocedure({_literal(signature)})"
+    fn = _function_lookup(signature)
     checks = [(f"function {signature} exists", f"{fn} IS NOT NULL")]
     checks.append((f"function {signature} ordinary function", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND p.prokind='f')"))
     checks.append((f"function {signature} return type", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND pg_catalog.format_type(p.prorettype,NULL)={_literal(spec['returns'])})"))
@@ -382,10 +404,13 @@ def _function_check(spec: dict[str, Any]) -> list[tuple[str, str]]:
         names_expr = "NULL::text[]" if not any(expected_names) else "ARRAY[" + ",".join("NULL::text" if name is None else f"{_literal(name)}::text" for name in expected_names) + "]::text[]"
         mode_codes = {"IN": "i", "OUT": "o", "INOUT": "b", "VARIADIC": "v", "TABLE": "t"}
         expected_modes = "ARRAY[" + ",".join(f"{_literal(mode_codes[argument['mode']])}::\"char\"" for argument in arguments) + "]::\"char\"[]"
-        expected_types = "ARRAY[" + ",".join(f"{_literal(argument['type'])}::regtype::oid" for argument in arguments) + "]::oid[]"
+        expected_types = "ARRAY[" + ",".join(
+            f"{_literal(_TYPE_ALIASES.get(argument['type'], argument['type']))}::text"
+            for argument in arguments
+        ) + "]::text[]"
         checks.append((f"function {signature} argument names", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND p.proargnames IS NOT DISTINCT FROM {names_expr})"))
         checks.append((f"function {signature} argument modes", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND COALESCE(p.proargmodes, pg_catalog.array_fill('i'::\"char\", ARRAY[p.pronargs])) IS NOT DISTINCT FROM {expected_modes})"))
-        checks.append((f"function {signature} argument types", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND ARRAY(SELECT unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[]))) IS NOT DISTINCT FROM {expected_types})"))
+        checks.append((f"function {signature} argument types", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND ARRAY(SELECT pg_catalog.format_type(argument_type.oid,NULL) FROM unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[])) WITH ORDINALITY AS argument_type(oid,ord) ORDER BY argument_type.ord) IS NOT DISTINCT FROM {expected_types})"))
     else:
         # Without an argument declaration, only all-IN functions are verifiable.
         # Their names are intentionally not part of the consumer contract.
@@ -394,9 +419,17 @@ def _function_check(spec: dict[str, Any]) -> list[tuple[str, str]]:
         expected = "ARRAY['search_path=\"\"']::text[]" if spec["search_path"] == "" else f"ARRAY[{_literal('search_path=' + spec['search_path'])}]::text[]"
         checks.append((f"function {signature} search_path", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND p.proconfig={expected})"))
     for role in spec["execute"]["allow"]:
-        checks.append((f"function {signature} EXECUTE for {role}", f"pg_catalog.has_function_privilege({_literal(role)},{fn},'EXECUTE') IS TRUE"))
+        if role == "public":
+            allowed = f"pg_catalog.has_function_privilege('public',{fn},'EXECUTE') IS TRUE"
+        else:
+            allowed = f"EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname={_literal(role)} AND pg_catalog.has_function_privilege(r.oid,{fn},'EXECUTE'))"
+        checks.append((f"function {signature} EXECUTE for {role}", allowed))
     for role in spec["execute"]["deny"]:
-        checks.append((f"function {signature} EXECUTE denied for {role}", f"pg_catalog.has_function_privilege({_literal(role)},{fn},'EXECUTE') IS FALSE"))
+        if role == "public":
+            denied = f"pg_catalog.has_function_privilege('public',{fn},'EXECUTE') IS FALSE"
+        else:
+            denied = f"NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname={_literal(role)} AND pg_catalog.has_function_privilege(r.oid,{fn},'EXECUTE'))"
+        checks.append((f"function {signature} EXECUTE denied for {role}", denied))
     return checks
 
 
@@ -407,7 +440,7 @@ def build_checks(contract: dict[str, Any]) -> list[tuple[str, str]]:
     for table in caps["tables"]:
         schema, name = table["schema"], table["name"]
         qualified = f"{schema}.{name}"
-        checks.append((f"table {qualified} exists", f"pg_catalog.to_regclass({_literal(qualified)}) IS NOT NULL"))
+        checks.append((f"table {qualified} exists", f"EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname={_literal(schema)} AND c.relname={_literal(name)})"))
         relkinds = {"table": "r", "partitioned_table": "p", "view": "v", "materialized_view": "m"}
         relation_kind = table.get("relation_kind", "table")
         checks.append((f"relation {qualified} kind={relation_kind}", f"EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname={_literal(schema)} AND c.relname={_literal(name)} AND c.relkind={_literal(relkinds[relation_kind])})"))
@@ -441,10 +474,10 @@ def build_checks(contract: dict[str, Any]) -> list[tuple[str, str]]:
     for section in ("auth", "realtime"):
         dep = caps.get(section, {})
         for signature in dep.get("functions", []):
-            checks.append((f"{section} function {signature} exists", f"pg_catalog.to_regprocedure({_literal(signature)}) IS NOT NULL"))
+            checks.append((f"{section} function {signature} exists", f"{_function_lookup(signature)} IS NOT NULL"))
     for relation in caps.get("realtime", {}).get("relations", []):
         schema, name = relation["schema"], relation["name"]
-        checks.append((f"Realtime relation {schema}.{name} exists", f"pg_catalog.to_regclass({_literal(f'{schema}.{name}')}) IS NOT NULL"))
+        checks.append((f"Realtime relation {schema}.{name} exists", f"EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname={_literal(schema)} AND c.relname={_literal(name)})"))
         checks.append((f"Realtime relation {schema}.{name} RLS", f"EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname={_literal(schema)} AND c.relname={_literal(name)} AND c.relrowsecurity IS {'TRUE' if relation['rls_enabled'] else 'FALSE'})"))
     for trigger in caps.get("realtime", {}).get("triggers", []):
         schema, name = _qualified_table(trigger["table"], "realtime.triggers.table")
