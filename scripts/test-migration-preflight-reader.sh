@@ -162,11 +162,84 @@ SQL
 export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
 psql -X -w -v ON_ERROR_STOP=1 -f \
   "$repo_root/supabase/diagnostics/verify_migration_preflight_reader.sql"
+psql -X -w -v ON_ERROR_STOP=1 -f \
+  "$repo_root/supabase/diagnostics/verify_dev_db_contract_reader.sql"
 [[ "$(psql -X -w -A -t -v ON_ERROR_STOP=1 -c \
   'SELECT version FROM supabase_migrations.schema_migrations')" == '20261027150000' ]]
 [[ "$(psql -X -w -A -t -v ON_ERROR_STOP=1 -c \
   'SELECT count(*) FROM ai_quota.settings WHERE id = 1')" == '1' ]]
 [[ "$(psql -X -w -A -t -v ON_ERROR_STOP=1 -c 'SHOW default_transaction_read_only')" == 'on' ]]
+
+expect_reader_diagnostic_denied() {
+  local label="$1"
+  if psql -X -w -v ON_ERROR_STOP=1 \
+    -f "$repo_root/supabase/diagnostics/verify_dev_db_contract_reader.sql" \
+    >"$test_root/reader-diagnostic.out" 2>&1; then
+    echo "Dev Reader diagnostic unexpectedly passed: $label" >&2
+    exit 1
+  fi
+  grep -q 'ERROR:' "$test_root/reader-diagnostic.out" || {
+    echo "Dev Reader diagnostic failed unexpectedly: $label" >&2
+    cat "$test_root/reader-diagnostic.out" >&2
+    exit 1
+  }
+}
+
+export PGUSER=postgres PGPASSWORD=disposable-postgres-password
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'GRANT migration_preflight_reader TO migration_preflight_login WITH INHERIT TRUE, SET TRUE' >/dev/null
+export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
+expect_reader_diagnostic_denied 'reader membership permits SET ROLE'
+export PGUSER=postgres PGPASSWORD=disposable-postgres-password
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'GRANT migration_preflight_reader TO migration_preflight_login WITH INHERIT TRUE, SET FALSE' >/dev/null
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'GRANT EXECUTE ON FUNCTION public.migration_reader_secdef_probe() TO migration_preflight_login' >/dev/null
+export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
+expect_reader_diagnostic_denied 'SECURITY DEFINER EXECUTE grant'
+export PGUSER=postgres PGPASSWORD=disposable-postgres-password
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'REVOKE EXECUTE ON FUNCTION public.migration_reader_secdef_probe() FROM migration_preflight_login' >/dev/null
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'GRANT CREATE ON DATABASE postgres TO migration_preflight_login' >/dev/null
+export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
+expect_reader_diagnostic_denied 'database CREATE grant'
+export PGUSER=postgres PGPASSWORD=disposable-postgres-password
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'REVOKE CREATE ON DATABASE postgres FROM migration_preflight_login' >/dev/null
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'GRANT SELECT ON public.business_rows TO migration_preflight_login' >/dev/null
+export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
+expect_reader_diagnostic_denied 'business table SELECT grant'
+export PGUSER=postgres PGPASSWORD=disposable-postgres-password
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'REVOKE SELECT ON public.business_rows FROM migration_preflight_login' >/dev/null
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'GRANT CREATE ON SCHEMA ai_quota TO migration_preflight_login' >/dev/null
+export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
+expect_reader_diagnostic_denied 'unexpected schema CREATE grant'
+export PGUSER=postgres PGPASSWORD=disposable-postgres-password
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'REVOKE CREATE ON SCHEMA ai_quota FROM migration_preflight_login' >/dev/null
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'GRANT anon TO migration_preflight_login WITH INHERIT TRUE, SET FALSE' >/dev/null
+export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
+expect_reader_diagnostic_denied 'application role membership'
+export PGUSER=postgres PGPASSWORD=disposable-postgres-password
+psql -X -w -v ON_ERROR_STOP=1 -c 'REVOKE anon FROM migration_preflight_login' >/dev/null
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'ALTER ROLE migration_preflight_login RESET default_transaction_read_only' >/dev/null
+export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
+expect_reader_diagnostic_denied 'default_transaction_read_only is off'
+export PGUSER=postgres PGPASSWORD=disposable-postgres-password
+psql -X -w -v ON_ERROR_STOP=1 -c \
+  'ALTER ROLE migration_preflight_login SET default_transaction_read_only = on' >/dev/null
+export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
+psql -X -w -v ON_ERROR_STOP=1 -f \
+  "$repo_root/supabase/diagnostics/verify_dev_db_contract_reader.sql" >/dev/null
+echo "PASS: Dev Reader audit accepts the minimum Reader and rejects excess grants, memberships, and read-write defaults"
+
+export PGUSER=postgres PGPASSWORD=disposable-postgres-password
 
 mkdir -p "$test_root/migrations"
 touch "$test_root/migrations/20261027150000_reader.sql"

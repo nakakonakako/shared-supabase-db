@@ -89,6 +89,8 @@ class DevDbContractCheckTests(unittest.TestCase):
         self.assertIn("name: development-db-check", workflow)
         self.assertIn("scripts/assert-latest-main.py", workflow)
         self.assertIn("scripts/validate-dev-db-contract-env.py", workflow)
+        self.assertIn("Verify minimum Dev Reader privileges", workflow)
+        self.assertIn("supabase/diagnostics/verify_dev_db_contract_reader.sql", workflow)
         self.assertIn("DEV_SUPABASE_POOLER_HOST", workflow)
         self.assertIn("DEV_SUPABASE_PROJECT_REF", workflow)
         self.assertIn("secrets.DEV_MIGRATION_READER_PASSWORD", workflow)
@@ -98,6 +100,14 @@ class DevDbContractCheckTests(unittest.TestCase):
         self.assertLess(
             workflow.index("Fetch and validate both pinned contracts before DB access"),
             workflow.index("secrets.DEV_MIGRATION_READER_PASSWORD"),
+        )
+        self.assertLess(
+            workflow.index("Validate dedicated Dev Reader target and credentials"),
+            workflow.index("Verify minimum Dev Reader privileges"),
+        )
+        self.assertLess(
+            workflow.index("Verify minimum Dev Reader privileges"),
+            workflow.index("Verify both contracts as the read-only Dev Reader"),
         )
 
 

@@ -71,6 +71,16 @@ jobs:
         run: python3 scripts/validate-dev-db-contract-env.py
       - name: Install PostgreSQL client
         run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify minimum Dev Reader privileges
+        env:
+          PGHOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
+          PGPORT: "5432"
+          PGDATABASE: postgres
+          PGUSER: migration_preflight_login.${{ vars.DEV_SUPABASE_PROJECT_REF }}
+          PGPASSWORD: ${{ secrets.DEV_MIGRATION_READER_PASSWORD }}
+          PGSSLMODE: require
+          PGCONNECT_TIMEOUT: "10"
+        run: psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_dev_db_contract_reader.sql
       - name: Verify both contracts as the read-only Dev Reader
         env:
           PGHOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
