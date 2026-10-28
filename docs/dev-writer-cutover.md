@@ -31,15 +31,15 @@ COMMENT ON DATABASE postgres IS
 | --- | --- | --- |
 | Deployment branches | Selected branches and tags | `main` branch 1件のみ |
 | Protection | Administrator bypass | 無効 |
-| Protection | Required reviewers | 1名以上、Prevent self-review有効 |
+| Protection | Required reviewers | 1名以上、Prevent self-review無効 |
 | Environment variable | `DEV_SUPABASE_POOLER_HOST` | Dev Session Pooler host |
 | Environment variable | `DEV_SUPABASE_PROJECT_REF` | Dev Project Ref。コード固定値と一致させる |
 | Environment variable | `DEV_DB_WRITER_ENABLED` | 初期値`false`。旧Writerを閉じた後だけ`true` |
 | Environment secret | `DEV_MIGRATION_SUPABASE_DB_PASSWORD` | Dev `postgres` role用password |
 
-Writer Environmentを作成してSecretを登録しただけではapplyは有効にならない。shared apply workflowは`DEV_DB_WRITER_ENABLED`が厳密に`true`でなければDevのWriter jobを失敗させる。Dev Writer接続確認workflowはフラグが`false`の間も実行でき、migration適用コマンドを持たない。protection metadata APIがEnvironment、main-only policy、reviewer、self-review設定を確認できない場合は接続前に停止する。
+Writer Environmentを作成してSecretを登録しただけではapplyは有効にならない。shared apply workflowは`DEV_DB_WRITER_ENABLED`が厳密に`true`でなければDevのWriter jobを失敗させる。Dev Writer接続確認workflowはフラグが`false`の間も実行でき、migration適用コマンドを持たない。protection metadata APIがEnvironment、main-only policy、Required reviewers、self-review設定を確認できない場合は接続前に停止する。
 
-独立reviewerを用意できない場合、自己承認を許さないDev Writer Environmentは実行できない。その場合はshared Writerを有効化せず、先に別reviewerの手配を行う。自己承認を認める設定を独立承認とみなさない。
+このrepositoryはGitHubアカウント1人で運用するため、DevではRequired reviewersを1名以上設定し、Prevent self-reviewを無効にする。起動者本人が自分のworkflowを承認できるが、これは独立した職務分離ではなく、誤操作を防ぐ手動確認ゲートである。`check-writer-environment.py`はreviewerとboolean設定の存在を検査し、Devでは`Prevent self-review=false`を要求する。main限定とadministrator bypass無効は維持する。
 
 ## 検証手順
 
@@ -47,7 +47,7 @@ Writer Environmentを作成してSecretを登録しただけではapplyは有効
 
 1. DB管理者が別のDashboardセッションでDev Project Refを照合し、Dev identity markerを設定
 2. 既存の`development-db-check` Reader設定が揃い、sharedのDev contract checkが成功することを確認
-3. `development-db-apply`をmain-only、bypass無効、reviewer必須/self-review禁止で作成し、Writer variable/Secretを登録。`DEV_DB_WRITER_ENABLED=false`を維持
+3. `development-db-apply`をmain-only、bypass無効、reviewer必須/Prevent self-review無効で作成し、Writer variable/Secretを登録。`DEV_DB_WRITER_ENABLED=false`を維持
 4. `Verify Dev DB Writer credentials (read-only)`をmainから手動実行。先にReader最小権限とReader identityを検査し、その後Protected Writer Environment承認を要求し、Writer credentialによるidentity queryだけを実行
 5. `IN_SYNC`のshared apply runはReader preflight/postflightを検証する安全なno-op。Writer jobはskipされるため、Writer credential接続成功の証拠にしない
 6. 旧receipt-manager `db:push` hosted apply経路を専用PRで閉じ、必要なDev password rotationを完了。旧passwordで接続できないことを管理者が安全に確認

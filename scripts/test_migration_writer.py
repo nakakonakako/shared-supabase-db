@@ -462,7 +462,7 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertEqual(unavailable.returncode, 2)
         self.assertNotIn("identity-probe-secret", unavailable.stdout + unavailable.stderr)
 
-    def test_dev_writer_environment_requires_main_policy_and_independent_reviewer(self) -> None:
+    def test_dev_writer_environment_requires_reviewer_but_allows_self_approval(self) -> None:
         from importlib.util import module_from_spec, spec_from_file_location
 
         spec = spec_from_file_location("check_writer_environment_dev", ENV_CHECK)
@@ -479,23 +479,29 @@ class MigrationWriterTests(unittest.TestCase):
                     "id": 2,
                     "type": "required_reviewers",
                     "reviewers": [{"type": "User", "reviewer": {"type": "User", "id": 8, "login": "reviewer"}}],
-                    "prevent_self_review": True,
+                    "prevent_self_review": False,
                 },
             ],
         }
         policy = {"total_count": 1, "branch_policies": [{"id": 1, "name": "main", "type": "branch"}]}
-        self.assertIn("self-approval prevented", module.validate(environment, policy, "dev"))
-        no_reviewer = {**environment, "protection_rules": [environment["protection_rules"][0]]}
-        with self.assertRaises(module.EnvironmentError):
-            module.validate(no_reviewer, policy, "dev")
-        self_approval_allowed = {
+        self.assertIn("self-approval allowed", module.validate(environment, policy, "dev"))
+        prevent_self = {
             **environment,
             "protection_rules": [environment["protection_rules"][0], {
-                **environment["protection_rules"][1], "prevent_self_review": False,
+                **environment["protection_rules"][1], "prevent_self_review": True,
             }],
         }
         with self.assertRaises(module.EnvironmentError):
-            module.validate(self_approval_allowed, policy, "dev")
+            module.validate(prevent_self, policy, "dev")
+        no_reviewer = {**environment, "protection_rules": [environment["protection_rules"][0]]}
+        with self.assertRaises(module.EnvironmentError):
+            module.validate(no_reviewer, policy, "dev")
+        admin_bypass = {**environment, "can_admins_bypass": True}
+        with self.assertRaises(module.EnvironmentError):
+            module.validate(admin_bypass, policy, "dev")
+        non_main_policy = {"total_count": 1, "branch_policies": [{"id": 1, "name": "release", "type": "branch"}]}
+        with self.assertRaises(module.EnvironmentError):
+            module.validate(environment, non_main_policy, "dev")
 
     def test_writer_workflows_are_manual_target_specific_and_least_permission(self) -> None:
         dev = (ROOT / ".github/workflows/apply-dev-db-migrations.yml").read_text(encoding="utf-8")
