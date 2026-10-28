@@ -218,7 +218,8 @@ class DbContractTests(unittest.TestCase):
                 "#!/usr/bin/env python3\n"
                 "import os,sys\n"
                 "args=sys.argv[1:]\n"
-                "sql=args[args.index('-c')+1]\n"
+                "if '-f' not in args or args[args.index('-f')+1] != '-': sys.exit(7)\n"
+                "sql=sys.stdin.read()\n"
                 "capture=os.environ.get('FAKE_SQL_CAPTURE')\n"
                 "if capture:\n open(capture,'a',encoding='utf-8').write(sql+'\\n')\n"
                 "if 'BEGIN TRANSACTION READ ONLY' not in sql: sys.exit(9)\n"
@@ -247,6 +248,17 @@ class DbContractTests(unittest.TestCase):
             captured = Path(env["FAKE_SQL_CAPTURE"]).read_text()
             self.assertEqual(captured.count("BEGIN TRANSACTION READ ONLY"), 1)
             self.assertNotIn("INSERT INTO", captured.upper())
+
+            large_contract = copy.deepcopy(self.valid)
+            original_table = large_contract["capabilities"]["tables"][0]
+            large_contract["capabilities"]["tables"] = [
+                {**copy.deepcopy(original_table), "name": f"fixture_items_{index}"}
+                for index in range(400)
+            ]
+            large_results = verify_catalog(large_contract, psql=str(fake), env=env)
+            self.assertTrue(large_results and all(result.passed for result in large_results))
+            captured = Path(env["FAKE_SQL_CAPTURE"]).read_text()
+            self.assertGreater(len(captured.encode("utf-8")), 131_072)
 
             missing_column = verify_catalog(self.valid, psql=str(fake), env={**env, "FAKE_FAIL_MATCH": "attname='label'"})
             self.assertTrue(any(not result.passed and "label" in result.label for result in missing_column))
