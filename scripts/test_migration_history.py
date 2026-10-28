@@ -48,7 +48,14 @@ class MigrationHistoryTests(unittest.TestCase):
             lines.append(f"{digest}  supabase/migrations/{path.name}")
         (self.migrations / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
-    def _check(self, remote: str, *, base: bool = False, env: dict[str, str] | None = None):
+    def _check(
+        self,
+        remote: str,
+        *,
+        base: bool = False,
+        env: dict[str, str] | None = None,
+        output: Path | None = None,
+    ):
         self.remote.write_text(remote)
         command = [
             "python3",
@@ -62,6 +69,8 @@ class MigrationHistoryTests(unittest.TestCase):
         ]
         if base:
             command.extend(["--base-ref", self.base])
+        if output:
+            command.extend(["--output", str(output)])
         merged_env = os.environ.copy()
         if env:
             merged_env.update(env)
@@ -83,19 +92,34 @@ class MigrationHistoryTests(unittest.TestCase):
         )
 
     def test_in_sync_history_passes(self) -> None:
-        result = self._check("20260101000000\n", base=True)
+        state_file = self.root / "history-state"
+        result = self._check("20260101000000\n", base=True, output=state_file)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("IN_SYNC", result.stdout)
+        self.assertEqual(state_file.read_text(encoding="utf-8"), "state=IN_SYNC\n")
 
     def test_local_only_is_pending_and_fails_closed(self) -> None:
-        result = self._check("")
+        state_file = self.root / "history-state"
+        result = self._check("", output=state_file)
         self.assertEqual(result.returncode, 1)
         self.assertIn("PENDING: 20260101000000", result.stderr)
+        self.assertEqual(state_file.read_text(encoding="utf-8"), "state=PENDING\n")
 
     def test_remote_only_fails_closed(self) -> None:
-        result = self._check("20250101000000\n")
+        state_file = self.root / "history-state"
+        result = self._check("20260101000000\n20250101000000\n", output=state_file)
         self.assertEqual(result.returncode, 1)
         self.assertIn("REMOTE_ONLY: 20250101000000", result.stderr)
+        self.assertEqual(state_file.read_text(encoding="utf-8"), "state=REMOTE_ONLY\n")
+
+    def test_divergent_or_non_prefix_history_is_error(self) -> None:
+        (self.migrations / "20260201000000_added.sql").write_text("select 2;\n")
+        self._write_manifest()
+        state_file = self.root / "history-state"
+        result = self._check("20260201000000\n", output=state_file)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("histories diverge", result.stderr)
+        self.assertEqual(state_file.read_text(encoding="utf-8"), "state=ERROR\n")
 
     def test_malformed_remote_history_fails_closed(self) -> None:
         result = self._check("not-a-version\n")
@@ -114,6 +138,7 @@ class MigrationHistoryTests(unittest.TestCase):
         psql = fake_bin / "psql"
         psql.write_text("#!/bin/sh\necho 'secret-test-password invalid' >&2\nexit 2\n")
         psql.chmod(0o700)
+        state_file = self.root / "history-state"
         result = subprocess.run(
             [
                 "python3",
@@ -122,6 +147,8 @@ class MigrationHistoryTests(unittest.TestCase):
                 str(self.repo),
                 "--migrations-dir",
                 str(self.migrations),
+                "--output",
+                str(state_file),
             ],
             capture_output=True,
             text=True,
@@ -130,6 +157,7 @@ class MigrationHistoryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("connection or migration-history query failed", result.stderr)
         self.assertNotIn("secret-test-password", result.stdout + result.stderr)
+        self.assertEqual(state_file.read_text(encoding="utf-8"), "state=ERROR\n")
 
     def test_changed_or_deleted_migration_is_rejected(self) -> None:
         migration = self.migrations / "20260101000000_initial.sql"

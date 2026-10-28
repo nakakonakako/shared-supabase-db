@@ -109,6 +109,30 @@ jobs:
       - run: npm ci
       - run: npm run test:sql:migration-reader
 
+  sql-migration-writer:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: migration_writer_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d migration_writer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run test:sql:migration-writer
+        env:
+          MIGRATION_WRITER_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/migration_writer_test
+
   sql-contract:
     runs-on: ubuntu-latest
     services:

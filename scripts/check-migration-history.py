@@ -13,7 +13,9 @@ from pathlib import Path
 MIGRATION_NAME = re.compile(r"^(\d{14})_[A-Za-z0-9][A-Za-z0-9_-]*\.sql$")
 VERSION = re.compile(r"^\d{14}$")
 HISTORY_QUERY = (
-    "SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;"
+    "BEGIN TRANSACTION READ ONLY; "
+    "SELECT version FROM supabase_migrations.schema_migrations ORDER BY version; "
+    "COMMIT;"
 )
 
 
@@ -51,7 +53,7 @@ def parse_remote_versions(output: str) -> set[str]:
 def query_remote_versions() -> set[str]:
     try:
         result = subprocess.run(
-            ["psql", "-X", "-w", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", HISTORY_QUERY],
+            ["psql", "-X", "-w", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", HISTORY_QUERY],
             check=True,
             capture_output=True,
             text=True,
@@ -143,6 +145,29 @@ def _validate_migration_manifest(migrations_dir: Path) -> None:
             raise CheckError(f"migration checksum mismatch: {name}")
 
 
+def _write_state(output: Path | None, state: str) -> None:
+    if output is None:
+        return
+    with output.open("a", encoding="utf-8") as stream:
+        stream.write(f"state={state}\n")
+
+
+def classify_history(local: set[str], remote: set[str]) -> str:
+    pending = local - remote
+    remote_only = remote - local
+    if pending and remote_only:
+        return "ERROR"
+    if remote_only:
+        return "REMOTE_ONLY"
+    if not pending:
+        return "IN_SYNC"
+    ordered_local = sorted(local)
+    applied_prefix = set(ordered_local[: len(remote)])
+    if remote != applied_prefix:
+        return "ERROR"
+    return "PENDING"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--migrations-dir", type=Path, default=Path("supabase/migrations"))
@@ -157,6 +182,11 @@ def main() -> int:
         "--remote-versions-file",
         type=Path,
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="append the classified history state to a GitHub Actions output file",
     )
     args = parser.parse_args()
 
@@ -174,19 +204,45 @@ def main() -> int:
         else:
             remote = query_remote_versions()
     except (CheckError, OSError) as error:
+        try:
+            _write_state(args.output, "ERROR")
+        except OSError:
+            pass
         print(f"migration preflight: ERROR: {error}", file=sys.stderr)
         return 2
 
+    state = classify_history(local, remote)
     pending = sorted(local - remote)
     remote_only = sorted(remote - local)
-    if remote_only:
+    if state == "ERROR":
+        try:
+            _write_state(args.output, "ERROR")
+        except OSError as error:
+            print("migration preflight: ERROR: cannot write the history state", file=sys.stderr)
+            return 2
+        print("migration preflight: ERROR: local and remote histories diverge", file=sys.stderr)
+        return 2
+    if state == "REMOTE_ONLY":
+        try:
+            _write_state(args.output, "REMOTE_ONLY")
+        except OSError:
+            print("migration preflight: ERROR: cannot write the history state", file=sys.stderr)
+            return 2
         print("migration preflight: REMOTE_ONLY: " + ",".join(remote_only), file=sys.stderr)
-    if pending:
+        return 1
+    if state == "PENDING":
+        try:
+            _write_state(args.output, "PENDING")
+        except OSError:
+            print("migration preflight: ERROR: cannot write the history state", file=sys.stderr)
+            return 2
         print("migration preflight: PENDING: " + ",".join(pending), file=sys.stderr)
-    if remote_only:
         return 1
-    if pending:
-        return 1
+    try:
+        _write_state(args.output, "IN_SYNC")
+    except OSError:
+        print("migration preflight: ERROR: cannot write the history state", file=sys.stderr)
+        return 2
     print(f"migration preflight: IN_SYNC ({len(local)} versions)")
     return 0
 

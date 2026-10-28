@@ -1,0 +1,14 @@
+name: Apply Dev DB migrations
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  apply:
+    uses: ./.github/workflows/_apply-db-migrations.yml
+    with:
+      target: dev

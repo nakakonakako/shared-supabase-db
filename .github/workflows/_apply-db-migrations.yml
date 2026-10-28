@@ -1,0 +1,261 @@
+name: Internal DB migration apply
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: shared-supabase-db-migration-apply-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require manual dispatch from main
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "DB migration workflows require manual dispatch from main." >&2
+            exit 1
+          fi
+          case "${{ inputs.target }}" in
+            dev|production) ;;
+            *) echo "DB migration target is invalid." >&2; exit 1 ;;
+          esac
+      - name: Checkout the dispatched main commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require latest main and immutable migration inventory
+        run: |
+          set -euo pipefail
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/check-migration-history.py \
+            --migrations-dir supabase/migrations \
+            --repo . \
+            --base-ref "${GITHUB_SHA}^1" \
+            --only-immutability
+      - name: Fetch and validate pinned app contracts before DB access
+        run: python3 scripts/verify-consumer-db-contracts.py --validate-only --contracts-dir "$RUNNER_TEMP/db-contracts"
+
+  preflight:
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.target == 'dev' && 'development-db-check' || 'production-db-check' }}
+    outputs:
+      state: ${{ steps.history.outputs.state }}
+    env:
+      DB_TARGET: ${{ inputs.target }}
+      DB_ENVIRONMENT: ${{ inputs.target == 'dev' && 'development-db-check' || 'production-db-check' }}
+      DB_POOLER_HOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
+      DB_PROJECT_REF: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
+      DB_CONNECTION_ROLE: reader
+      PGHOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
+      PGPORT: "5432"
+      PGDATABASE: postgres
+      PGUSER: migration_preflight_login.${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
+      PGPASSWORD: ${{ inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD || secrets.MIGRATION_READER_PASSWORD }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: "10"
+    steps:
+      - name: Checkout the dispatched main commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Recheck latest main and validate contracts before DB access
+        run: |
+          set -euo pipefail
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/verify-consumer-db-contracts.py --validate-only --contracts-dir "$RUNNER_TEMP/db-contracts"
+      - name: Validate the dedicated Reader target
+        run: python3 scripts/validate-writer-db-env.py
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify minimum Reader privileges
+        run: |
+          set -euo pipefail
+          if [[ "$DB_TARGET" == dev ]]; then
+            psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_dev_db_contract_reader.sql >/dev/null
+          else
+            psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_production_db_reader.sql >/dev/null
+          fi
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_migration_preflight_reader.sql >/dev/null
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_migration_reader_bootstrap.sql >/dev/null
+      - name: Classify shared migration history
+        id: history
+        run: |
+          set -euo pipefail
+          set +e
+          python3 scripts/check-migration-history.py \
+            --migrations-dir supabase/migrations \
+            --repo . \
+            --base-ref "${GITHUB_SHA}^1" \
+            --output "$GITHUB_OUTPUT"
+          result=$?
+          set -e
+          state="$(sed -n 's/^state=//p' "$GITHUB_OUTPUT" | tail -n 1)"
+          case "$state:$result" in
+            IN_SYNC:0|PENDING:1)
+              echo "Shared migration history state: $state"
+              ;;
+            *)
+              echo "Shared migration history is not eligible for apply: ${state:-ERROR}" >&2
+              exit 1
+              ;;
+          esac
+      - name: Verify current pinned app contracts before apply
+        run: python3 scripts/verify-consumer-db-contracts.py --contracts-dir "$RUNNER_TEMP/db-contracts"
+
+  verify-writer-environment:
+    needs: preflight
+    if: needs.preflight.outputs.state == 'PENDING'
+    runs-on: ubuntu-latest
+    env:
+      DB_TARGET: ${{ inputs.target }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout the dispatched main commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require a preconfigured, protected Writer Environment
+        run: python3 scripts/check-writer-environment.py
+
+  apply:
+    needs: [prepare, preflight, verify-writer-environment]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.preflight.result == 'success' &&
+      needs.preflight.outputs.state == 'PENDING' && needs.verify-writer-environment.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.target == 'dev' && 'development-db-apply' || 'production-db-apply' }}
+    env:
+      DB_TARGET: ${{ inputs.target }}
+      DB_ENVIRONMENT: ${{ inputs.target == 'dev' && 'development-db-apply' || 'production-db-apply' }}
+      DB_POOLER_HOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
+      DB_PROJECT_REF: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
+      DB_CONNECTION_ROLE: writer
+      PGHOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
+      PGPORT: "5432"
+      PGDATABASE: postgres
+      PGUSER: postgres.${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
+      PGPASSWORD: ${{ inputs.target == 'dev' && secrets.DEV_MIGRATION_SUPABASE_DB_PASSWORD || secrets.MIGRATION_SUPABASE_DB_PASSWORD }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: "10"
+    steps:
+      - name: Checkout the dispatched main commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Recheck main and Writer target after Environment approval
+        run: |
+          set -euo pipefail
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/validate-writer-db-env.py
+          python3 scripts/check-migration-history.py \
+            --migrations-dir supabase/migrations \
+            --repo . \
+            --base-ref "${GITHUB_SHA}^1" \
+            --only-immutability
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Set up Supabase CLI
+        uses: supabase/setup-cli@v3
+        with:
+          version: 2.117.0
+      - name: Prepare the protected Writer connection
+        run: python3 scripts/write-supabase-db-url.py --output "$GITHUB_ENV"
+      - name: Apply pending migrations or safely no-op
+        run: |
+          set -euo pipefail
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/apply-pending-migrations.py \
+            --repo . \
+            --migrations-dir supabase/migrations \
+            --workdir . \
+            --base-ref "${GITHUB_SHA}^1"
+
+  postflight:
+    needs: [prepare, preflight, verify-writer-environment, apply]
+    if: >-
+      always() && needs.prepare.result == 'success' && needs.preflight.result == 'success' &&
+      contains(fromJSON('["IN_SYNC","PENDING"]'), needs.preflight.outputs.state) &&
+      (needs.verify-writer-environment.result == 'success' || needs.verify-writer-environment.result == 'skipped') &&
+      (needs.apply.result == 'success' || needs.apply.result == 'skipped' || needs.apply.result == 'failure')
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.target == 'dev' && 'development-db-check' || 'production-db-check' }}
+    env:
+      DB_TARGET: ${{ inputs.target }}
+      DB_ENVIRONMENT: ${{ inputs.target == 'dev' && 'development-db-check' || 'production-db-check' }}
+      DB_POOLER_HOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
+      DB_PROJECT_REF: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
+      DB_CONNECTION_ROLE: reader
+      PGHOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
+      PGPORT: "5432"
+      PGDATABASE: postgres
+      PGUSER: migration_preflight_login.${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
+      PGPASSWORD: ${{ inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD || secrets.MIGRATION_READER_PASSWORD }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: "10"
+    steps:
+      - name: Checkout the dispatched main commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate pinned contracts before DB access
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-consumer-db-contracts.py --validate-only --contracts-dir "$RUNNER_TEMP/db-contracts"
+          python3 scripts/validate-writer-db-env.py
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Require shared migration history IN_SYNC
+        run: python3 scripts/check-migration-history.py --migrations-dir supabase/migrations --repo . --base-ref "${GITHUB_SHA}^1"
+      - name: Verify Reader privileges and database integrity
+        run: |
+          set -euo pipefail
+          if [[ "$DB_TARGET" == dev ]]; then
+            psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_dev_db_contract_reader.sql >/dev/null
+          else
+            psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_production_db_reader.sql >/dev/null
+            python3 scripts/verify-production-db-integrity.py --output "$RUNNER_TEMP/production-db-integrity.out"
+            grep -Fxq 'result=PASS' "$RUNNER_TEMP/production-db-integrity.out"
+          fi
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_migration_preflight_reader.sql >/dev/null
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_migration_reader_bootstrap.sql >/dev/null
+      - name: Verify current pinned app contracts after apply
+        run: python3 scripts/verify-consumer-db-contracts.py --contracts-dir "$RUNNER_TEMP/db-contracts"
