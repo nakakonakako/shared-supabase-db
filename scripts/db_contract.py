@@ -364,8 +364,17 @@ def _policy_check(schema: str, table: str, policy: dict[str, Any]) -> str:
 
 
 def _privilege_check(schema: str, table: str, entry: dict[str, Any], privilege: str, expected: bool) -> str:
-    granted = f"EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_roles r ON r.rolname={_literal(entry['role'])} WHERE n.nspname={_literal(schema)} AND c.relname={_literal(table)} AND pg_catalog.has_table_privilege(r.oid,c.oid,{_literal(privilege)}))"
-    return f"({granted}) IS {'TRUE' if expected else 'FALSE'}"
+    role = entry["role"]
+    relation = "pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace"
+    relation_filter = f"n.nspname={_literal(schema)} AND c.relname={_literal(table)}"
+    if role == "public":
+        granted = f"EXISTS (SELECT 1 FROM {relation} CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) AS acl WHERE {relation_filter} AND acl.grantee=0 AND acl.privilege_type={_literal(privilege)})"
+        return f"({granted}) IS {'TRUE' if expected else 'FALSE'}"
+
+    role_exists = f"EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname={_literal(role)})"
+    granted = f"EXISTS (SELECT 1 FROM {relation} JOIN pg_catalog.pg_roles r ON r.rolname={_literal(role)} WHERE {relation_filter} AND pg_catalog.has_table_privilege(r.oid,c.oid,{_literal(privilege)}))"
+    condition = f"{granted}" if expected else f"NOT ({granted})"
+    return f"(({role_exists}) AND ({condition})) IS TRUE"
 
 
 _TYPE_ALIASES = {
@@ -419,18 +428,23 @@ def _function_check(spec: dict[str, Any]) -> list[tuple[str, str]]:
         expected = "ARRAY['search_path=\"\"']::text[]" if spec["search_path"] == "" else f"ARRAY[{_literal('search_path=' + spec['search_path'])}]::text[]"
         checks.append((f"function {signature} search_path", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND p.proconfig={expected})"))
     for role in spec["execute"]["allow"]:
-        if role == "public":
-            allowed = f"pg_catalog.has_function_privilege('public',{fn},'EXECUTE') IS TRUE"
-        else:
-            allowed = f"EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname={_literal(role)} AND pg_catalog.has_function_privilege(r.oid,{fn},'EXECUTE'))"
+        allowed = _function_execute_check(fn, role, expected=True)
         checks.append((f"function {signature} EXECUTE for {role}", allowed))
     for role in spec["execute"]["deny"]:
-        if role == "public":
-            denied = f"pg_catalog.has_function_privilege('public',{fn},'EXECUTE') IS FALSE"
-        else:
-            denied = f"NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname={_literal(role)} AND pg_catalog.has_function_privilege(r.oid,{fn},'EXECUTE'))"
+        denied = _function_execute_check(fn, role, expected=False)
         checks.append((f"function {signature} EXECUTE denied for {role}", denied))
     return checks
+
+
+def _function_execute_check(function_oid: str, role: str, *, expected: bool) -> str:
+    if role == "public":
+        granted = f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) AS acl WHERE p.oid={function_oid} AND acl.grantee=0 AND acl.privilege_type='EXECUTE')"
+        return f"({granted}) IS {'TRUE' if expected else 'FALSE'}"
+
+    role_exists = f"EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname={_literal(role)})"
+    granted = f"EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname={_literal(role)} AND pg_catalog.has_function_privilege(r.oid,{function_oid},'EXECUTE'))"
+    condition = granted if expected else f"NOT ({granted})"
+    return f"(({role_exists}) AND ({condition})) IS TRUE"
 
 
 def build_checks(contract: dict[str, Any]) -> list[tuple[str, str]]:

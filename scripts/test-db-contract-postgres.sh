@@ -39,14 +39,18 @@ fi
 output="$(mktemp "${TMPDIR:-/tmp}/db-contract-mismatch.XXXXXX")"
 not_valid_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-not-valid.XXXXXX")"
 advanced_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-advanced.XXXXXX")"
+public_acl_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-public-acl.XXXXXX")"
+function_acl_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-function-acl.XXXXXX")"
 contracts_dir="$(mktemp -d "${TMPDIR:-/tmp}/db-contract-pinned-fixtures.XXXXXX")"
-trap 'rm -rf -- "$contracts_dir"; rm -f -- "$output" "$not_valid_contract" "$advanced_contract"' EXIT INT TERM
+trap 'rm -rf -- "$contracts_dir"; rm -f -- "$output" "$not_valid_contract" "$advanced_contract" "$public_acl_contract" "$function_acl_contract"' EXIT INT TERM
 
 fresh="$(psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -Atqc "
   SELECT pg_catalog.to_regnamespace('auth') IS NULL
     AND pg_catalog.to_regnamespace('realtime') IS NULL
     AND pg_catalog.to_regnamespace('ai_quota') IS NULL
     AND pg_catalog.to_regclass('public.fixture_items') IS NULL
+    AND pg_catalog.to_regclass('public.acl_probe_table') IS NULL
+    AND pg_catalog.to_regprocedure('public.acl_probe_function()') IS NULL
     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname IN ('anon','authenticated','migration_preflight_reader','contract_reader_login'))
 ")"
 if [[ "$fresh" != "t" ]]; then
@@ -80,6 +84,7 @@ CREATE TABLE public.fixture_items (
   UNIQUE (user_id, label)
 );
 CREATE TABLE public.relation_probe (id uuid);
+CREATE TABLE public.acl_probe_table (id integer NOT NULL);
 ALTER TABLE public.fixture_items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY fixture_items_owner_all ON public.fixture_items
   FOR ALL TO authenticated USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
@@ -102,6 +107,9 @@ RETURNS text LANGUAGE sql SECURITY INVOKER SET search_path = ''
 AS $$ SELECT $1::text $$;
 REVOKE ALL ON FUNCTION public.fixture_lookup(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.fixture_lookup(uuid) TO authenticated;
+CREATE FUNCTION public.acl_probe_function()
+RETURNS integer LANGUAGE sql SECURITY INVOKER AS $$ SELECT 1 $$;
+GRANT EXECUTE ON FUNCTION public.acl_probe_function() TO authenticated;
 CREATE FUNCTION public.fixture_mode(IN p_user_id uuid)
 RETURNS uuid LANGUAGE sql SECURITY INVOKER AS $$ SELECT $1 $$;
 REVOKE ALL ON FUNCTION public.fixture_mode(uuid) FROM PUBLIC;
@@ -236,6 +244,151 @@ expect_failure() {
   fi
   echo "PASS: rejected $assertion"
 }
+
+python3 - "$public_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+contract = {
+    "format_version": 1,
+    "app_id": "public-acl-probe",
+    "contract_version": "1.0.0",
+    "capabilities": {
+        "tables": [{
+            "schema": "public", "name": "acl_probe_table",
+            "columns": [{"name": "id", "type": "integer", "nullable": False}],
+            "privileges": [{"role": "public", "allow": [], "deny": ["SELECT"]}],
+        }],
+        "functions": [],
+    },
+}
+Path(sys.argv[1]).write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$public_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'GRANT SELECT ON public.acl_probe_table TO PUBLIC' >/dev/null
+expect_failure 'table public.acl_probe_table public SELECT denied' "$public_acl_contract"
+python3 - "$public_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+privilege = contract["capabilities"]["tables"][0]["privileges"][0]
+privilege["allow"], privilege["deny"] = ["SELECT"], []
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$public_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE SELECT ON public.acl_probe_table FROM PUBLIC' >/dev/null
+expect_failure 'table public.acl_probe_table public SELECT allowed' "$public_acl_contract"
+python3 - "$public_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+privilege = contract["capabilities"]["tables"][0]["privileges"][0]
+privilege["allow"], privilege["deny"] = [], ["SELECT"]
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$public_acl_contract"
+python3 - "$public_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["tables"][0]["privileges"][0] = {
+    "role": "contract_missing_role", "allow": [], "deny": ["SELECT"]
+}
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'table public.acl_probe_table contract_missing_role SELECT denied' "$public_acl_contract"
+echo "PASS: table ACL checks handle PUBLIC and missing roles"
+
+python3 - "$function_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+contract = {
+    "format_version": 1,
+    "app_id": "function-acl-probe",
+    "contract_version": "1.0.0",
+    "capabilities": {
+        "tables": [],
+        "functions": [{
+            "signature": "public.acl_probe_function()", "returns": "integer",
+            "security": "invoker",
+            "execute": {"allow": ["authenticated"], "deny": ["public"]},
+        }],
+    },
+}
+Path(sys.argv[1]).write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'function public.acl_probe_function() EXECUTE denied for public' "$function_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE EXECUTE ON FUNCTION public.acl_probe_function() FROM PUBLIC' >/dev/null
+python3 scripts/check-db-contract.py "$function_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'GRANT EXECUTE ON FUNCTION public.acl_probe_function() TO PUBLIC' >/dev/null
+expect_failure 'function public.acl_probe_function() EXECUTE denied for public' "$function_acl_contract"
+python3 - "$function_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["functions"][0]["execute"] = {"allow": ["authenticated", "public"], "deny": []}
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$function_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE EXECUTE ON FUNCTION public.acl_probe_function() FROM PUBLIC' >/dev/null
+expect_failure 'function public.acl_probe_function() EXECUTE for public' "$function_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'GRANT EXECUTE ON FUNCTION public.acl_probe_function() TO PUBLIC' >/dev/null
+python3 - "$function_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["functions"][0]["execute"]["deny"] = ["contract_missing_role"]
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'function public.acl_probe_function() EXECUTE denied for contract_missing_role' "$function_acl_contract"
+python3 - "$function_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["functions"][0]["execute"] = {"allow": ["authenticated"], "deny": []}
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE EXECUTE ON FUNCTION public.acl_probe_function() FROM PUBLIC' >/dev/null
+python3 scripts/check-db-contract.py "$function_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE EXECUTE ON FUNCTION public.acl_probe_function() FROM authenticated' >/dev/null
+if python3 scripts/check-db-contract.py "$function_acl_contract" >"$output" 2>&1; then
+  echo "Missing authenticated EXECUTE privilege was accepted." >&2
+  exit 1
+fi
+grep -Fq 'function public.acl_probe_function() EXECUTE for authenticated' "$output"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'GRANT EXECUTE ON FUNCTION public.acl_probe_function() TO authenticated' >/dev/null
+python3 scripts/check-db-contract.py "$function_acl_contract"
+echo "PASS: function EXECUTE ACL checks handle PUBLIC, real roles, and missing roles"
 
 python3 - "$advanced_contract" <<'PY'
 import json
