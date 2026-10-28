@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from db_contract import ContractError, VerificationError, build_checks, load_contract, validate_contract, verify_catalog
+from db_contract import ContractError, VerificationError, _policy_check, build_checks, load_contract, validate_contract, verify_catalog
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "scripts/fixtures/db-contract-v1.example.json"
@@ -76,10 +76,79 @@ class DbContractTests(unittest.TestCase):
         invalid_fk_validation = copy.deepcopy(self.valid)
         invalid_fk_validation["capabilities"]["tables"][0]["constraints"][2]["validated"] = "false"
         invalids.append(invalid_fk_validation)
+        invalid_policy_name = copy.deepcopy(self.valid)
+        invalid_policy_name["capabilities"]["tables"][0]["rls"]["policies"][0]["name"] = "p" * 64
+        invalids.append(invalid_policy_name)
+        invalid_policy_nul = copy.deepcopy(self.valid)
+        invalid_policy_nul["capabilities"]["tables"][0]["rls"]["policies"][0]["name"] = "bad\x00name"
+        invalids.append(invalid_policy_nul)
+        invalid_set_null_columns = copy.deepcopy(self.valid)
+        invalid_set_null_columns["capabilities"]["tables"][0]["constraints"][2]["set_null_columns"] = ["missing"]
+        invalids.append(invalid_set_null_columns)
+        invalid_set_null_without_action = copy.deepcopy(self.valid)
+        invalid_set_null_without_action["capabilities"]["tables"][0]["constraints"][2]["set_null_columns"] = ["user_id"]
+        invalids.append(invalid_set_null_without_action)
+        invalid_all_set_null_column_order = copy.deepcopy(self.valid)
+        table = invalid_all_set_null_column_order["capabilities"]["tables"][0]
+        table["columns"].append({"name": "receipt_item_id", "type": "uuid", "nullable": True})
+        table["constraints"].append({
+            "kind": "foreign_key", "columns": ["user_id", "receipt_item_id"],
+            "references": {"table": "public.fixture_targets", "columns": ["user_id", "id"]},
+            "on_delete": "set_null", "set_null_columns": ["receipt_item_id", "user_id"],
+        })
+        invalids.append(invalid_all_set_null_column_order)
         for contract in invalids:
             with self.subTest(contract=contract):
                 with self.assertRaises(ContractError):
                     validate_contract(contract)
+
+    def test_quoted_policy_names_are_safe_and_identifier_length_is_byte_bounded(self) -> None:
+        contract = copy.deepcopy(self.valid)
+        policy_name = "Owner's Policy \"v1\"; DROP TABLE public.fixture_items;--"
+        contract["capabilities"]["tables"][0]["rls"]["policies"][0]["name"] = policy_name
+        validated = validate_contract(contract)
+        query = _policy_check("public", "fixture_items", validated["capabilities"]["tables"][0]["rls"]["policies"][0])
+        self.assertIn(policy_name.encode("utf-8").hex(), query)
+        self.assertNotIn(policy_name, query)
+        self.assertNotIn("DROP TABLE", query)
+        self.assertNotIn(policy_name, "\n".join(label for label, _ in build_checks(validated)))
+
+        contract["capabilities"]["tables"][0]["rls"]["policies"][0]["name"] = "x" * 63
+        validate_contract(contract)
+        contract["capabilities"]["tables"][0]["rls"]["policies"][0]["name"] = "é" * 32
+        with self.assertRaises(ContractError):
+            validate_contract(contract)
+
+    def test_maintain_privilege_is_supported_and_emitted_for_allow_and_deny(self) -> None:
+        contract = copy.deepcopy(self.valid)
+        privilege = contract["capabilities"]["tables"][0]["privileges"][0]
+        privilege["allow"].append("MAINTAIN")
+        privilege["deny"].append("TRIGGER")
+        checks = build_checks(validate_contract(contract))
+        sql = dict(checks)
+        self.assertIn("pg_catalog.has_table_privilege('authenticated','public.fixture_items','MAINTAIN') IS TRUE", sql["table public.fixture_items authenticated MAINTAIN allowed"])
+        self.assertIn("pg_catalog.has_table_privilege('authenticated','public.fixture_items','TRIGGER') IS FALSE", sql["table public.fixture_items authenticated TRIGGER denied"])
+
+    def test_set_null_columns_distinguishes_all_columns_from_subset(self) -> None:
+        contract = copy.deepcopy(self.valid)
+        table = contract["capabilities"]["tables"][0]
+        table["columns"].append({"name": "receipt_item_id", "type": "uuid", "nullable": True})
+        table["constraints"].append({
+            "kind": "foreign_key",
+            "columns": ["user_id", "receipt_item_id"],
+            "references": {"table": "public.fixture_targets", "columns": ["user_id", "id"]},
+            "on_delete": "set_null",
+            "set_null_columns": ["receipt_item_id"],
+        })
+        query = dict(build_checks(validate_contract(contract)))["constraint public.fixture_items foreign_key(user_id,receipt_item_id)"]
+        self.assertIn("unnest(c.confdelsetcols)", query)
+        table["constraints"][-1].pop("set_null_columns")
+        omitted_query = dict(build_checks(validate_contract(contract)))["constraint public.fixture_items foreign_key(user_id,receipt_item_id)"]
+        self.assertNotIn("confdelsetcols", omitted_query)
+        table["constraints"][-1]["set_null_columns"] = ["user_id", "receipt_item_id"]
+        all_columns_query = dict(build_checks(validate_contract(contract)))["constraint public.fixture_items foreign_key(user_id,receipt_item_id)"]
+        self.assertIn("c.confdelsetcols IS NULL", all_columns_query)
+        self.assertNotIn("unnest(c.confdelsetcols)", all_columns_query)
 
     def test_contract_assertions_follow_only_declared_requirements(self) -> None:
         checks_before = build_checks(self.valid)

@@ -69,7 +69,20 @@ CREATE TABLE public.relation_probe (id uuid);
 ALTER TABLE public.fixture_items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY fixture_items_owner_all ON public.fixture_items
   FOR ALL TO authenticated USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+CREATE POLICY "Mixed Case Owner's Policy" ON public.fixture_items
+  FOR SELECT TO authenticated USING (true);
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.fixture_items TO authenticated;
+CREATE TABLE public.fixture_fk_target (
+  user_id uuid NOT NULL,
+  id uuid NOT NULL,
+  PRIMARY KEY (user_id, id)
+);
+CREATE TABLE public.fixture_fk_source (
+  user_id uuid NOT NULL,
+  receipt_item_id uuid,
+  CONSTRAINT fixture_fk_source_owner_fk FOREIGN KEY (user_id, receipt_item_id)
+    REFERENCES public.fixture_fk_target(user_id, id) ON DELETE SET NULL (receipt_item_id)
+);
 CREATE FUNCTION public.fixture_lookup(p_user_id uuid)
 RETURNS text LANGUAGE sql SECURITY INVOKER SET search_path = ''
 AS $$ SELECT $1::text $$;
@@ -106,7 +119,8 @@ SQL
 python3 scripts/check-db-contract.py scripts/fixtures/db-contract-v1.example.json
 output="$(mktemp "${TMPDIR:-/tmp}/db-contract-mismatch.XXXXXX")"
 not_valid_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-not-valid.XXXXXX")"
-trap 'rm -f -- "$output" "$not_valid_contract"' EXIT INT TERM
+advanced_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-advanced.XXXXXX")"
+trap 'rm -f -- "$output" "$not_valid_contract" "$advanced_contract"' EXIT INT TERM
 
 expect_failure() {
   local assertion="$1" contract_file="${2:-scripts/fixtures/db-contract-v1.example.json}"
@@ -120,6 +134,167 @@ expect_failure() {
   fi
   echo "PASS: rejected $assertion"
 }
+
+python3 - "$advanced_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+contract = json.loads(Path("scripts/fixtures/db-contract-v1.example.json").read_text(encoding="utf-8"))
+items = contract["capabilities"]["tables"][0]
+items["rls"]["policies"].append({"name": "Mixed Case Owner's Policy", "command": "SELECT", "roles": ["authenticated"]})
+items["privileges"][0]["deny"].append("MAINTAIN")
+contract["capabilities"]["tables"].extend([
+    {
+        "schema": "public", "name": "fixture_fk_target",
+        "columns": [
+            {"name": "user_id", "type": "uuid", "nullable": False},
+            {"name": "id", "type": "uuid", "nullable": False},
+        ],
+        "constraints": [{"kind": "primary_key", "columns": ["user_id", "id"]}],
+    },
+    {
+        "schema": "public", "name": "fixture_fk_source",
+        "columns": [
+            {"name": "user_id", "type": "uuid", "nullable": False},
+            {"name": "receipt_item_id", "type": "uuid", "nullable": True},
+        ],
+        "constraints": [{
+            "kind": "foreign_key", "columns": ["user_id", "receipt_item_id"],
+            "references": {"table": "public.fixture_fk_target", "columns": ["user_id", "id"]},
+            "on_delete": "set_null", "set_null_columns": ["receipt_item_id"],
+        }],
+    },
+])
+Path(sys.argv[1]).write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$advanced_contract"
+
+python3 - "$advanced_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["tables"][0]["rls"]["policies"][-1]["roles"] = ["anon"]
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'policy public.fixture_items metadata #2' "$advanced_contract"
+python3 - "$advanced_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["tables"][0]["rls"]["policies"][-1].update(roles=["authenticated"], command="UPDATE")
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'policy public.fixture_items metadata #2' "$advanced_contract"
+python3 - "$advanced_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["tables"][0]["rls"]["policies"][-1].update(name="mixed case owner's policy", command="SELECT")
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'policy public.fixture_items metadata #2' "$advanced_contract"
+python3 - "$advanced_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["tables"][0]["rls"]["policies"][-1].update(name="Mixed Case Owner's Policy", command="SELECT")
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -c 'GRANT MAINTAIN ON TABLE public.fixture_items TO authenticated'
+expect_failure 'table public.fixture_items authenticated MAINTAIN denied' "$advanced_contract"
+python3 - "$advanced_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+entry = contract["capabilities"]["tables"][0]["privileges"][0]
+entry["deny"].remove("MAINTAIN")
+entry["allow"].append("MAINTAIN")
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$advanced_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -c 'REVOKE MAINTAIN ON TABLE public.fixture_items FROM authenticated'
+expect_failure 'table public.fixture_items authenticated MAINTAIN allowed' "$advanced_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -c 'GRANT MAINTAIN ON TABLE public.fixture_items TO authenticated'
+python3 scripts/check-db-contract.py "$advanced_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -c 'REVOKE MAINTAIN ON TABLE public.fixture_items FROM authenticated'
+python3 - "$advanced_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+entry = contract["capabilities"]["tables"][0]["privileges"][0]
+entry["allow"].remove("MAINTAIN")
+entry["deny"].append("MAINTAIN")
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$advanced_contract"
+
+python3 - "$advanced_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+constraint = contract["capabilities"]["tables"][-1]["constraints"][0]
+constraint["set_null_columns"] = ["user_id", "receipt_item_id"]
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'constraint public.fixture_fk_source foreign_key(user_id,receipt_item_id)' "$advanced_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 <<'SQL'
+ALTER TABLE public.fixture_fk_source DROP CONSTRAINT fixture_fk_source_owner_fk;
+ALTER TABLE public.fixture_fk_source ADD CONSTRAINT fixture_fk_source_owner_fk
+  FOREIGN KEY (user_id, receipt_item_id) REFERENCES public.fixture_fk_target(user_id, id)
+  ON DELETE SET NULL (user_id);
+SQL
+python3 - "$advanced_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+constraint = contract["capabilities"]["tables"][-1]["constraints"][0]
+constraint["set_null_columns"] = ["receipt_item_id"]
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'constraint public.fixture_fk_source foreign_key(user_id,receipt_item_id)' "$advanced_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 <<'SQL'
+ALTER TABLE public.fixture_fk_source DROP CONSTRAINT fixture_fk_source_owner_fk;
+ALTER TABLE public.fixture_fk_source ADD CONSTRAINT fixture_fk_source_owner_fk
+  FOREIGN KEY (user_id, receipt_item_id) REFERENCES public.fixture_fk_target(user_id, id)
+  ON DELETE SET NULL;
+SQL
+python3 - "$advanced_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["tables"][-1]["constraints"][0]["set_null_columns"] = ["user_id", "receipt_item_id"]
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$advanced_contract"
 
 psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 <<'SQL'
 DROP FUNCTION public.fixture_lookup(uuid);
