@@ -73,7 +73,7 @@ python3 scripts/check-db-contract.py path/to/contract.json
 
 ## 契約原本の取得とSHA固定
 
-契約本文はアプリリポジトリ内のファイルを正本とし、shared側には複製しない。shared側の参照は`repository`、`path`、完全な40桁commit SHAで固定し、branch/tag名には追従しない。現在の初期検証revisionは`price-memo`の`9ed2ae9ff1b5d9cac19141ffde41a3321d225051`と`receipt-manager`の`2c6803cdd7dbc31d441c822df23027f2ddc3f6ce`。このSHAは実際の本番稼働revisionを表さない。
+契約本文はアプリリポジトリ内のファイルを正本とし、shared側には複製しない。shared側の参照は`repository`、`path`、完全な40桁commit SHAで固定し、branch/tag名には追従しない。現在の初期検証revisionは`price-memo`の`7620cc8e43ef1defeaa0700d6ad0d509097ae52d`と`receipt-manager`の`2c6803cdd7dbc31d441c822df23027f2ddc3f6ce`。このSHAは実際の本番稼働revisionを表さない。
 
 `scripts/consumer_db_contracts.py`はGitHub公開Commit APIで指定SHAと応答の完全一致を確認し、その後`raw.githubusercontent.com/<repo>/<sha>/<path>`から取得する。トークンや追加Secretは使用しない。取得、SHA確認、UTF-8 JSON decode、v1形式、期待する`app_id`のいずれかが失敗した場合はDB照合へ進まない。契約ファイルはworkflow runnerの一時領域にだけ保存する。
 

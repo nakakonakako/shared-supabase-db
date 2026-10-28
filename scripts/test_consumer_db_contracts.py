@@ -24,7 +24,7 @@ class ConsumerContractFetchTests(unittest.TestCase):
         self.assertEqual(
             [(item.repository, item.path, item.commit) for item in consumer.CONTRACTS],
             [
-                ("nakakonakako/price-memo", "db-contracts/price-memo.json", "9ed2ae9ff1b5d9cac19141ffde41a3321d225051"),
+                ("nakakonakako/price-memo", "db-contracts/price-memo.json", "7620cc8e43ef1defeaa0700d6ad0d509097ae52d"),
                 ("nakakonakako/receipt-manager", "db-contracts/receipt-manager.json", "2c6803cdd7dbc31d441c822df23027f2ddc3f6ce"),
             ],
         )
