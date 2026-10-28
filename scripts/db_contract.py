@@ -522,8 +522,8 @@ def verify_catalog(contract: dict[str, Any], *, psql: str = "psql", env: dict[st
     )
     try:
         process = subprocess.run(
-            [psql, "-X", "-w", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", sql],
-            capture_output=True, text=True, check=False, timeout=45, env=env,
+            [psql, "-X", "-w", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-f", "-"],
+            input=sql, capture_output=True, text=True, check=False, timeout=45, env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise VerificationError("PostgreSQL contract verification could not execute") from exc
