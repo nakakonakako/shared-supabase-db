@@ -1,0 +1,83 @@
+name: Dev consumer DB contract read-only check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-supabase-dev-consumer-db-contract-check
+  cancel-in-progress: false
+
+jobs:
+  require-latest-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require manual dispatch from main
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Dev DB contract checks can only be dispatched from main." >&2
+            exit 1
+          fi
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require the latest main commit
+        run: python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+
+  verify-dev:
+    needs: require-latest-main
+    if: needs.require-latest-main.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: development-db-check
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Recheck main ref and latest SHA
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Dev DB contract checks can only be dispatched from main." >&2
+            exit 1
+          fi
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+      - name: Fetch and validate both pinned contracts before DB access
+        run: python3 scripts/verify-consumer-db-contracts.py --validate-only --contracts-dir "$RUNNER_TEMP/db-contracts"
+      - name: Validate dedicated Dev Reader target and credentials
+        env:
+          DEV_SUPABASE_POOLER_HOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
+          DEV_SUPABASE_PROJECT_REF: ${{ vars.DEV_SUPABASE_PROJECT_REF }}
+          DEV_MIGRATION_READER_PASSWORD: ${{ secrets.DEV_MIGRATION_READER_PASSWORD }}
+          PGHOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
+          PGPORT: "5432"
+          PGDATABASE: postgres
+          PGUSER: migration_preflight_login.${{ vars.DEV_SUPABASE_PROJECT_REF }}
+          PGSSLMODE: require
+          PGCONNECT_TIMEOUT: "10"
+        run: python3 scripts/validate-dev-db-contract-env.py
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify both contracts as the read-only Dev Reader
+        env:
+          PGHOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
+          PGPORT: "5432"
+          PGDATABASE: postgres
+          PGUSER: migration_preflight_login.${{ vars.DEV_SUPABASE_PROJECT_REF }}
+          PGPASSWORD: ${{ secrets.DEV_MIGRATION_READER_PASSWORD }}
+          PGSSLMODE: require
+          PGCONNECT_TIMEOUT: "10"
+        run: python3 scripts/verify-consumer-db-contracts.py --contracts-dir "$RUNNER_TEMP/db-contracts"
