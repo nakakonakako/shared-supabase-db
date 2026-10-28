@@ -10,6 +10,11 @@ import sys
 HOST = re.compile(r"^aws-[0-9]+-[a-z0-9-]+\.pooler\.supabase\.com$")
 PROJECT_REF = re.compile(r"^[A-Za-z0-9]+$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
+# Public Supabase project identifiers pinned independently of GitHub Environment values.
+EXPECTED_PROJECT_REFS = {
+    "dev": "irgahixsuvtopiwmtkku",
+    "production": "fsrbddgyysssqzyullrc",
+}
 UNSUPPORTED_LIBPQ_OVERRIDES = (
     "PGHOSTADDR",
     "PGSERVICE",
@@ -43,6 +48,7 @@ def main() -> int:
         and bool(SHA.fullmatch(os.environ.get("GITHUB_SHA", "")))
         and bool(HOST.fullmatch(host))
         and bool(PROJECT_REF.fullmatch(project_ref))
+        and project_ref == EXPECTED_PROJECT_REFS.get(target)
         and os.environ.get("PGHOST") == host
         and os.environ.get("PGPORT") == "5432"
         and os.environ.get("PGDATABASE") == "postgres"

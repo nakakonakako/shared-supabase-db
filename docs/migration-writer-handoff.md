@@ -4,11 +4,15 @@
 
 `apply-dev-db-migrations.yml` と `apply-production-db-migrations.yml` は、mainからの手動実行だけを受け付ける。両方とも同じ再利用workflowを呼び出すが、呼び出し側でtargetを固定し、Reader Environment、Writer Environment、接続先変数、資格情報を分離する。PR CIからhosted DBへの接続はない。
 
+DB接続前に、Environmentのproject refをworkflowコード内のDev/Prod固定project refと照合する。Environment変数同士の検証だけでは、Dev EnvironmentへProdの接続先一式を誤登録した場合を検出できないため、この独立pinで拒否する。Dev/Prodで共有するpooler hostnameは接続先識別子として扱わない。固定refの変更はプロジェクト切替を伴う明示的なコードレビュー対象とする。この事前検査はEnvironment設定ミスを防ぐが、接続後のSupabase側project identityを別制御面から証明するものではない。切替段階では接続後のidentity照合も必須とし、資格情報登録前にDev/Prodそれぞれの期待値を確認する。
+
 この段階はWriter workflow基盤と隔離テストだけを追加する。GitHub EnvironmentやSecretを作成・変更せず、hosted DBへ接続せず、migrationも適用しない。workflowに参照されるEnvironmentが未作成または保護不足なら、Reader事前検証の後、GitHub APIの読み取り専用保護確認で停止する。未設定のEnvironmentをGitHubが暗黙に作成して適用jobへ進むことを避ける。
 
 Writer Environmentはworkflowのmain制限に加えて、GitHub側で事前に作成し、`main`だけのdeployment branch policyとadministrator bypass無効を設定する。Devでは `development-db-apply` に `DEV_SUPABASE_POOLER_HOST`、`DEV_SUPABASE_PROJECT_REF`、`DEV_MIGRATION_SUPABASE_DB_PASSWORD` を設定する。Prodでは `production-db-apply` に `PROD_SUPABASE_POOLER_HOST`、`PROD_SUPABASE_PROJECT_REF`、`MIGRATION_SUPABASE_DB_PASSWORD` を設定する。値の登録は別途承認された切り替え作業で行い、このPRでは登録しない。
 
 Prod EnvironmentにはRequired reviewersが最低1名必要。独立承認者を用意できない場合は、同一運用者をreviewerにした手動承認を設定できるが、これは独立した職務分離ではなく、実行を止めて確認した記録を残すゲートに限られる。可能なら別の管理者・運用者をreviewerにし、Prevent self-reviewとadministrator bypass無効を設定する。独立承認者がいない間に使える追加保護は、main限定、手動dispatch、main SHA再確認、migration不変性/checksum確認、Writer SecretのEnvironment限定、Reader事前/事後検証、同一shared repo内の直列化である。これらは独立承認の代替ではない。
+
+Environment保護検査はdeployment branch policyの総数と全要素、`main`という名前、`branch`種別を確認する。API応答の欠落・不整合や未知のprotection ruleはfail-closedとする。
 
 ## 適用判定
 

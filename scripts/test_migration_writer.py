@@ -15,6 +15,7 @@ WRITER_ENV = ROOT / "scripts/validate-writer-db-env.py"
 APPLY = ROOT / "scripts/apply-pending-migrations.py"
 ENV_CHECK = ROOT / "scripts/check-writer-environment.py"
 URL_WRITER = ROOT / "scripts/write-supabase-db-url.py"
+WORKFLOW_RESULT = ROOT / "scripts/evaluate-db-migration-workflow.py"
 
 
 class MigrationWriterTests(unittest.TestCase):
@@ -60,14 +61,14 @@ class MigrationWriterTests(unittest.TestCase):
             "DB_TARGET": "production",
             "DB_ENVIRONMENT": "production-db-apply",
             "DB_POOLER_HOST": "aws-1-us-east-2.pooler.supabase.com",
-            "DB_PROJECT_REF": "prodprojectref123456789",
+            "DB_PROJECT_REF": "fsrbddgyysssqzyullrc",
             "DB_CONNECTION_ROLE": "writer",
             "GITHUB_REF": "refs/heads/main",
             "GITHUB_SHA": "a" * 40,
             "PGHOST": "aws-1-us-east-2.pooler.supabase.com",
             "PGPORT": "5432",
             "PGDATABASE": "postgres",
-            "PGUSER": "postgres.prodprojectref123456789",
+            "PGUSER": "postgres.fsrbddgyysssqzyullrc",
             "PGPASSWORD": "writer-secret-fixture",
             "PGSSLMODE": "require",
             "PGCONNECT_TIMEOUT": "10",
@@ -141,7 +142,7 @@ class MigrationWriterTests(unittest.TestCase):
             {"DB_TARGET": "dev"},
             {"DB_ENVIRONMENT": "production-db-check"},
             {"PGHOST": "aws-1-us-east-2.pooler.supabase.com.attacker.invalid"},
-            {"PGUSER": "migration_preflight_login.prodprojectref123456789"},
+            {"PGUSER": "migration_preflight_login.fsrbddgyysssqzyullrc"},
             {"PGSSLMODE": "disable"},
             {"GITHUB_REF": "refs/heads/feature"},
             {"PGOPTIONS": "-c default_transaction_read_only=off"},
@@ -157,12 +158,23 @@ class MigrationWriterTests(unittest.TestCase):
                 "DB_TARGET": "dev",
                 "DB_ENVIRONMENT": "development-db-apply",
                 "DB_POOLER_HOST": "aws-2-us-east-1.pooler.supabase.com",
-                "DB_PROJECT_REF": "devprojectref123456789",
+                "DB_PROJECT_REF": "irgahixsuvtopiwmtkku",
                 "PGHOST": "aws-2-us-east-1.pooler.supabase.com",
-                "PGUSER": "postgres.devprojectref123456789",
+                "PGUSER": "postgres.irgahixsuvtopiwmtkku",
             }
         )
         self.assertEqual(dev.returncode, 0, dev.stderr)
+        wrong_dev_project = self._validate_writer(
+            {
+                "DB_TARGET": "dev",
+                "DB_ENVIRONMENT": "development-db-apply",
+                "DB_POOLER_HOST": "aws-1-ap-northeast-1.pooler.supabase.com",
+                "DB_PROJECT_REF": "fsrbddgyysssqzyullrc",
+                "PGHOST": "aws-1-ap-northeast-1.pooler.supabase.com",
+                "PGUSER": "postgres.fsrbddgyysssqzyullrc",
+            }
+        )
+        self.assertEqual(wrong_dev_project.returncode, 2)
 
     def test_writer_url_is_percent_encoded_to_runner_file_without_logging_password(self) -> None:
         env_file = self.root / "runner-env"
@@ -310,12 +322,13 @@ class MigrationWriterTests(unittest.TestCase):
         base = {
             "name": "production-db-apply",
             "can_admins_bypass": False,
-            "deployment_branch_policy": {"custom_branch_policies": True},
+            "deployment_branch_policy": {"custom_branch_policies": True, "protected_branches": False},
             "protection_rules": [
-                {"type": "branch_policy"},
+                {"id": 1, "type": "branch_policy"},
                 {
+                    "id": 2,
                     "type": "required_reviewers",
-                    "reviewers": [{"reviewer": {"login": "reviewer"}}],
+                    "reviewers": [{"type": "User", "reviewer": {"type": "User", "id": 9, "login": "reviewer"}}],
                     "prevent_self_review": False,
                 },
             ],
@@ -326,13 +339,65 @@ class MigrationWriterTests(unittest.TestCase):
         assert spec and spec.loader
         module = module_from_spec(spec)
         spec.loader.exec_module(module)
-        message = module.validate(base, {"branch_policies": [{"name": "main"}]}, "production")
+        main_policy = {"total_count": 1, "branch_policies": [{"id": 1, "name": "main", "type": "branch"}]}
+        message = module.validate(base, main_policy, "production")
         self.assertIn("self-approval", message)
+        team_reviewer = {
+            **base,
+            "protection_rules": [
+                base["protection_rules"][0],
+                {
+                    "id": 2,
+                    "type": "required_reviewers",
+                    "reviewers": [{"type": "Team", "reviewer": {"id": 7, "slug": "db-ops", "name": "DB Ops"}}],
+                    "prevent_self_review": True,
+                },
+            ],
+        }
+        self.assertIn("self-review is prevented", module.validate(team_reviewer, main_policy, "production"))
         invalid = {**base, "can_admins_bypass": True}
         with self.assertRaises(module.EnvironmentError):
-            module.validate(invalid, {"branch_policies": [{"name": "main"}]}, "production")
+            module.validate(invalid, main_policy, "production")
         with self.assertRaises(module.EnvironmentError):
-            module.validate(base, {"branch_policies": [{"name": "main"}, {"name": "release"}]}, "production")
+            module.validate(base, {"total_count": 2, "branch_policies": [
+                {"id": 1, "name": "main", "type": "branch"},
+                {"id": 2, "name": "release", "type": "branch"},
+            ]}, "production")
+        for invalid_policy in (
+            {"total_count": 1, "branch_policies": [{"id": 1, "name": "main", "type": "tag"}]},
+            {"total_count": 1, "branch_policies": [{"id": 1, "name": "release", "type": "branch"}]},
+            {"branch_policies": [{"id": 1, "name": "main", "type": "branch"}]},
+            {"total_count": 2, "branch_policies": [{"id": 1, "name": "main", "type": "branch"}]},
+        ):
+            with self.subTest(policy=invalid_policy), self.assertRaises(module.EnvironmentError):
+                module.validate(base, invalid_policy, "production")
+        incomplete = {**base, "deployment_branch_policy": {"custom_branch_policies": True}}
+        with self.assertRaises(module.EnvironmentError):
+            module.validate(incomplete, main_policy, "production")
+        unknown_rule = {**base, "protection_rules": [*base["protection_rules"], {"id": 3, "type": "future_rule"}]}
+        with self.assertRaises(module.EnvironmentError):
+            module.validate(unknown_rule, main_policy, "production")
+
+    def test_workflow_result_gate_covers_success_failure_and_unexpected_skip(self) -> None:
+        def outcome(state: str, preflight: str, environment: str, apply: str, postflight: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, str(WORKFLOW_RESULT), "--state", state, "--preflight", preflight,
+                 "--environment", environment, "--apply", apply, "--postflight", postflight],
+                capture_output=True, text=True, check=False,
+            )
+
+        synced = outcome("IN_SYNC", "success", "skipped", "skipped", "success")
+        self.assertEqual(synced.returncode, 0, synced.stderr)
+        pending = outcome("PENDING", "success", "success", "success", "success")
+        self.assertEqual(pending.returncode, 0, pending.stderr)
+        for failed in (
+            outcome("PENDING", "success", "success", "failure", "success"),
+            outcome("PENDING", "success", "success", "skipped", "skipped"),
+            outcome("PENDING", "success", "success", "success", "failure"),
+            outcome("REMOTE_ONLY", "success", "skipped", "skipped", "skipped"),
+            outcome("PENDING", "failure", "skipped", "skipped", "skipped"),
+        ):
+            self.assertNotEqual(failed.returncode, 0)
 
     def test_writer_workflows_are_manual_target_specific_and_least_permission(self) -> None:
         dev = (ROOT / ".github/workflows/apply-dev-db-migrations.yml").read_text(encoding="utf-8")
@@ -352,6 +417,12 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertIn("scripts/check-writer-environment.py", reusable)
         self.assertIn("scripts/validate-writer-db-env.py", reusable)
         self.assertIn("scripts/apply-pending-migrations.py", reusable)
+        self.assertIn("scripts/evaluate-db-migration-workflow.py", reusable)
+        self.assertIn("needs.preflight.outputs.state == 'IN_SYNC'", reusable)
+        self.assertIn("needs.preflight.outputs.state == 'PENDING'", reusable)
+        self.assertIn("needs.apply.result == 'failure'", reusable)
+        self.assertIn("final-result:", reusable)
+        self.assertIn("if: always()", reusable)
         self.assertIn("MIGRATION_SUPABASE_DB_PASSWORD", reusable)
         self.assertIn("DEV_MIGRATION_SUPABASE_DB_PASSWORD", reusable)
         self.assertIn("Verify current pinned app contracts before apply", reusable)

@@ -208,8 +208,9 @@ jobs:
     if: >-
       always() && needs.prepare.result == 'success' && needs.preflight.result == 'success' &&
       contains(fromJSON('["IN_SYNC","PENDING"]'), needs.preflight.outputs.state) &&
-      (needs.verify-writer-environment.result == 'success' || needs.verify-writer-environment.result == 'skipped') &&
-      (needs.apply.result == 'success' || needs.apply.result == 'skipped' || needs.apply.result == 'failure')
+      ((needs.preflight.outputs.state == 'IN_SYNC' && needs.verify-writer-environment.result == 'skipped' && needs.apply.result == 'skipped') ||
+       (needs.preflight.outputs.state == 'PENDING' && needs.verify-writer-environment.result == 'success' &&
+        (needs.apply.result == 'success' || needs.apply.result == 'failure')))
     runs-on: ubuntu-latest
     environment:
       name: ${{ inputs.target == 'dev' && 'development-db-check' || 'production-db-check' }}
@@ -259,3 +260,28 @@ jobs:
           psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_migration_reader_bootstrap.sql >/dev/null
       - name: Verify current pinned app contracts after apply
         run: python3 scripts/verify-consumer-db-contracts.py --contracts-dir "$RUNNER_TEMP/db-contracts"
+
+  final-result:
+    needs: [prepare, preflight, verify-writer-environment, apply, postflight]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the dispatched main commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require the state-specific successful outcome
+        env:
+          HISTORY_STATE: ${{ needs.preflight.outputs.state }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          ENVIRONMENT_RESULT: ${{ needs.verify-writer-environment.result }}
+          APPLY_RESULT: ${{ needs.apply.result }}
+          POSTFLIGHT_RESULT: ${{ needs.postflight.result }}
+        run: |
+          set -euo pipefail
+          python3 scripts/evaluate-db-migration-workflow.py \
+            --state "$HISTORY_STATE" \
+            --preflight "$PREFLIGHT_RESULT" \
+            --environment "$ENVIRONMENT_RESULT" \
+            --apply "$APPLY_RESULT" \
+            --postflight "$POSTFLIGHT_RESULT"

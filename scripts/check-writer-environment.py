@@ -47,21 +47,43 @@ def validate(environment: dict, branch_policy: dict, target: str) -> str:
     if environment.get("can_admins_bypass") is not False:
         raise EnvironmentError("Writer Environment administrator bypass must be disabled")
     deployment_policy = environment.get("deployment_branch_policy")
-    if not isinstance(deployment_policy, dict) or deployment_policy.get("custom_branch_policies") is not True:
+    if (
+        not isinstance(deployment_policy, dict)
+        or type(deployment_policy.get("custom_branch_policies")) is not bool
+        or deployment_policy.get("custom_branch_policies") is not True
+        or type(deployment_policy.get("protected_branches")) is not bool
+        or deployment_policy.get("protected_branches") is not False
+    ):
         raise EnvironmentError("Writer Environment must use an explicit main-only branch policy")
     policies = branch_policy.get("branch_policies")
-    names = sorted(
-        policy.get("name", "")
-        for policy in policies or []
-        if isinstance(policy, dict)
-    )
-    if names != ["main"]:
+    total_count = branch_policy.get("total_count")
+    if (
+        type(total_count) is not int
+        or not isinstance(policies, list)
+        or total_count != len(policies)
+        or total_count != 1
+    ):
+        raise EnvironmentError("Writer Environment branch policy response is incomplete or unexpected")
+    policy = policies[0]
+    if (
+        not isinstance(policy, dict)
+        or type(policy.get("id")) is not int
+        or policy.get("name") != "main"
+        or policy.get("type") != "branch"
+    ):
         raise EnvironmentError("Writer Environment must allow only the main branch")
 
     rules = environment.get("protection_rules")
-    if not isinstance(rules, list) or not any(
-        isinstance(rule, dict) and rule.get("type") == "branch_policy" for rule in rules
-    ):
+    if not isinstance(rules, list) or any(not isinstance(rule, dict) for rule in rules):
+        raise EnvironmentError("Writer Environment protection metadata is incomplete")
+    if any(rule.get("type") not in {"branch_policy", "required_reviewers"} for rule in rules):
+        raise EnvironmentError("Writer Environment contains an unsupported protection rule")
+    if any(type(rule.get("id")) is not int for rule in rules):
+        raise EnvironmentError("Writer Environment protection metadata is incomplete")
+    if len({rule["id"] for rule in rules}) != len(rules):
+        raise EnvironmentError("Writer Environment protection metadata is inconsistent")
+    branch_rules = [rule for rule in rules if rule.get("type") == "branch_policy"]
+    if len(branch_rules) != 1 or type(branch_rules[0].get("id")) is not int:
         raise EnvironmentError("Writer Environment branch protection is missing")
     reviewer_rules = [
         rule
@@ -69,8 +91,35 @@ def validate(environment: dict, branch_policy: dict, target: str) -> str:
         if isinstance(rule, dict) and rule.get("type") == "required_reviewers"
     ]
     if target == "production":
-        if not reviewer_rules or not any(rule.get("reviewers") for rule in reviewer_rules):
+        if (
+            not reviewer_rules
+            or any(not isinstance(rule.get("reviewers"), list) for rule in reviewer_rules)
+            or not any(rule.get("reviewers") for rule in reviewer_rules)
+        ):
             raise EnvironmentError("production Writer Environment requires at least one reviewer")
+        if any(
+            not isinstance(reviewer, dict)
+            or reviewer.get("type") not in {"User", "Team"}
+            or not isinstance(reviewer.get("reviewer"), dict)
+            or type(reviewer["reviewer"].get("id")) is not int
+            or reviewer["reviewer"].get("type", reviewer["type"]) != reviewer["type"]
+            or (
+                reviewer["type"] == "User"
+                and (not isinstance(reviewer["reviewer"].get("login"), str) or not reviewer["reviewer"]["login"])
+            )
+            or (
+                reviewer["type"] == "Team"
+                and not any(
+                    isinstance(reviewer["reviewer"].get(key), str) and reviewer["reviewer"][key]
+                    for key in ("slug", "name")
+                )
+            )
+            for rule in reviewer_rules
+            for reviewer in rule["reviewers"]
+        ):
+            raise EnvironmentError("production Writer reviewer metadata is incomplete")
+        if any(type(rule.get("prevent_self_review")) is not bool for rule in reviewer_rules):
+            raise EnvironmentError("production Writer reviewer protection metadata is incomplete")
         if any(rule.get("prevent_self_review") is True for rule in reviewer_rules):
             return "production Writer Environment protection valid (self-review is prevented)"
         return "production Writer Environment protection valid (reviewer gate allows self-approval)"
