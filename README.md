@@ -7,7 +7,8 @@
 - `supabase/migrations/` はreceipt-managerから移した既存14本を保持
 - 適用済みmigrationは不変。変更ではなく、新しいmigrationの追加で変更を表現
 - Supabase CLIはローカル開発用。`db push`やlinked projectへの接続は使用しない
-- CIは使い捨てPostgreSQLでSQL検証を行う
+- PR CIは使い捨てPostgreSQLだけを使用し、Supabase認証情報を受け取らない
+- 本番接続は`production-db-check` Environmentを使う手動・読み取り専用workflowに限定
 
 ## 開発
 
@@ -18,7 +19,7 @@ npm ci
 npm run check
 ```
 
-SQLテスト3系統は専用の新しいPostgreSQLクラスター上で実行する。AI quotaテストはクラスター全体にロールを作るため、他のSQLテストともクラスターを分ける。
+SQLテスト4系統は専用の新しいPostgreSQLクラスター上で実行する。ReaderテストはPostgreSQL 17コンテナを自動起動する。AI quotaテストはクラスター全体にロールを作るため、他のSQLテストともクラスターを分ける。
 
 ```sh
 AI_QUOTA_TEST_ALLOW_DISPOSABLE_DB=YES \
@@ -28,6 +29,7 @@ PRICE_MEMO_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/price_memo_dat
   npm run test:sql:data-deletion
 PRICE_MEMO_BROADCAST_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/price_memo_private_broadcast_test \
   npm run test:sql:private-broadcast
+npm run test:sql:migration-reader
 ```
 
 URLはloopbackに限定され、テストごとの専用データベース名を要求する。テスト用URLをシェル履歴やログに残さないこと。
@@ -42,6 +44,26 @@ URLはloopbackに限定され、テストごとの専用データベース名を
 4. `IN_SYNC`以外（`PENDING`、`REMOTE_ONLY`、接続失敗、形式エラー）は作業を止め、原因を調査する。両環境の結果を環境名・日時・commit SHAとともに変更記録へ残す。
 
 DevとProdは個別に照合し、両方の結果をレビューする。migration履歴照合はスキーマや権限の健全性検証を代替せず、DB更新を実行しない。
+
+## 本番DB読み取り専用検証ゲート
+
+`.github/workflows/production-db-check.yml`は`workflow_dispatch`専用で、mainからの実行だけを受け付ける。実行時にdispatch refと最新main SHAを確認し、履歴が`IN_SYNC`であること、Readerの最小権限、Reader bootstrap、RPC、AI quota、ACLの整合性を読み取り専用SQLで検査する。接続・履歴・診断エラーはすべて失敗扱い。PR CIからは本番へ接続せず、workflowはmigration適用や書き込みを行わない。
+
+このEnvironmentはまだ自動作成・設定されない前提。workflowをmainへマージする前に、GitHub Settingsで次の順に人が設定する。
+
+1. `production-db-check` Environmentを作成
+2. Deployment branchesをSelected branches and tagsにし、`main`だけを許可
+3. Environment Variablesを設定
+   - `PROD_SUPABASE_POOLER_HOST`: ProdプロジェクトのConnect画面からコピーしたSession Poolerのhostのみ（URL・portなし）
+   - `PROD_SUPABASE_PROJECT_REF`: 同じProdプロジェクトのproject ref
+4. Environment Secretを設定
+   - `MIGRATION_READER_PASSWORD`: 既存`migration_preflight_login`専用のReaderパスワード
+5. Hostとproject refの組み合わせ、Reader専用パスワードの所有者、Environmentのmain制限を別の担当者がレビュー
+6. 設定完了後にPRをmainへマージし、Actions画面から`main`を選んで手動実行
+
+workflowはSession Poolerのhost形式と、Reader専用username、port `5432`、database `postgres`、SSL `require`、secretの存在を接続前に確認する。Supabaseの共有Session Poolerはport `5432`を使い、custom roleのusernameは`<role>.<project-ref>`形式。[Supabase接続ドキュメント](https://supabase.com/docs/guides/database/connecting-to-postgres)
+
+Environment未設定、変数・secret欠落、main以外からのdispatch、最新main SHAとの不一致ではDB接続前に停止する。Writer用SecretやGitHub Settingsの変更はこのworkflowに含めない。
 
 ## Migrationの不変性
 
