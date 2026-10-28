@@ -1,0 +1,100 @@
+name: PR CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: npm run check
+      - name: Reject edits to existing migrations
+        run: python3 scripts/check-migration-history.py --migrations-dir supabase/migrations --repo . --base-ref "origin/${{ github.base_ref }}" --only-immutability
+
+  sql-ai-quota:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: ai_quota_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ai_quota_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run test:sql:ai-quota
+        env:
+          AI_QUOTA_TEST_ALLOW_DISPOSABLE_DB: YES
+          AI_QUOTA_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/ai_quota_test
+
+  sql-data-deletion:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: price_memo_data_deletion_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d price_memo_data_deletion_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run test:sql:data-deletion
+        env:
+          PRICE_MEMO_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/price_memo_data_deletion_test
+
+  sql-private-broadcast:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: price_memo_private_broadcast_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d price_memo_private_broadcast_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run test:sql:private-broadcast
+        env:
+          PRICE_MEMO_BROADCAST_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/price_memo_private_broadcast_test
