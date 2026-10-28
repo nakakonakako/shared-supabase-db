@@ -4,6 +4,8 @@
 
 `apply-dev-db-migrations.yml` と `apply-production-db-migrations.yml` は、mainからの手動実行だけを受け付ける。両方とも同じ再利用workflowを呼び出すが、呼び出し側でtargetを固定し、Reader Environment、Writer Environment、接続先変数、資格情報を分離する。PR CIからhosted DBへの接続はない。
 
+Dev Writer identity marker、Writer credentialのread-only probe、旧receipt-manager経路を閉じる切替条件と復旧順は[Dev Writer切り替え準備](./dev-writer-cutover.md)を参照する。Dev applyは`DEV_DB_WRITER_ENABLED=true`を明示設定するまでfail-closed。Production workflow/Environmentはこの準備範囲では変更しない。
+
 DB接続前に、Environmentのproject refをworkflowコード内のDev/Prod固定project refと照合する。Environment変数同士の検証だけでは、Dev EnvironmentへProdの接続先一式を誤登録した場合を検出できないため、この独立pinで拒否する。Dev/Prodで共有するpooler hostnameは接続先識別子として扱わない。固定refの変更はプロジェクト切替を伴う明示的なコードレビュー対象とする。この事前検査はEnvironment設定ミスを防ぐが、接続後のSupabase側project identityを別制御面から証明するものではない。切替段階では接続後のidentity照合も必須とし、資格情報登録前にDev/Prodそれぞれの期待値を確認する。
 
 この段階はWriter workflow基盤と隔離テストだけを追加する。GitHub EnvironmentやSecretを作成・変更せず、hosted DBへ接続せず、migrationも適用しない。workflowに参照されるEnvironmentが未作成または保護不足なら、Reader事前検証の後、GitHub APIの読み取り専用保護確認で停止する。未設定のEnvironmentをGitHubが暗黙に作成して適用jobへ進むことを避ける。

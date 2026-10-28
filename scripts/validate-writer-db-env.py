@@ -7,14 +7,11 @@ import os
 import re
 import sys
 
+from db_target_identity import EXPECTED_PROJECT_REFS
+
 HOST = re.compile(r"^aws-[0-9]+-[a-z0-9-]+\.pooler\.supabase\.com$")
 PROJECT_REF = re.compile(r"^[A-Za-z0-9]+$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
-# Public Supabase project identifiers pinned independently of GitHub Environment values.
-EXPECTED_PROJECT_REFS = {
-    "dev": "irgahixsuvtopiwmtkku",
-    "production": "fsrbddgyysssqzyullrc",
-}
 UNSUPPORTED_LIBPQ_OVERRIDES = (
     "PGHOSTADDR",
     "PGSERVICE",

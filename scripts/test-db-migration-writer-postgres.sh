@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$repo_root"
 : "${MIGRATION_WRITER_TEST_DATABASE_URL:?Set a disposable PostgreSQL 17 MIGRATION_WRITER_TEST_DATABASE_URL}"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/migration-writer-test.XXXXXX")"
+trap 'rm -rf -- "$test_root"' EXIT INT TERM
 
 python3 - <<'PY'
 import os
@@ -16,22 +18,23 @@ if target.path.lstrip("/") != "migration_writer_test" or target.username != "pos
     raise SystemExit("Refusing migration Writer test: use the disposable migration_writer_test database")
 PY
 
-while IFS='=' read -r name value; do export "$name=$value"; done < <(python3 - <<'PY'
+mapfile -t pg_config < <(python3 - <<'PY'
 import os
 from urllib.parse import urlparse
 
 target = urlparse(os.environ["MIGRATION_WRITER_TEST_DATABASE_URL"])
-for key, value in {
-    "PGHOST": target.hostname,
-    "PGPORT": str(target.port or 5432),
-    "PGDATABASE": target.path.lstrip("/"),
-    "PGUSER": target.username or "",
-    "PGPASSWORD": target.password or "",
-    "PGSSLMODE": "disable",
-}.items():
-    print(f"{key}={value}")
+for value in (
+    target.hostname or "",
+    str(target.port or 5432),
+    target.path.lstrip("/"),
+    target.username or "",
+    target.password or "",
+):
+    print(value)
 PY
 )
+export PGHOST="${pg_config[0]}" PGPORT="${pg_config[1]}" PGDATABASE="${pg_config[2]}"
+export PGUSER="${pg_config[3]}" PGPASSWORD="${pg_config[4]}" PGSSLMODE=disable
 
 database_name="$(psql "$MIGRATION_WRITER_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -Atqc 'SELECT current_database()')"
 server_version="$(psql "$MIGRATION_WRITER_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -Atqc 'SHOW server_version_num')"
@@ -51,10 +54,57 @@ CREATE TABLE supabase_migrations.schema_migrations (
   version text PRIMARY KEY,
   statements text[] NOT NULL
 );
+CREATE ROLE db_identity_reader LOGIN PASSWORD 'disposable-identity-reader-password'
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE db_identity_reader SET default_transaction_read_only = on;
+COMMENT ON DATABASE migration_writer_test IS
+  'shared-supabase-db:target=dev;project_ref=irgahixsuvtopiwmtkku';
 SQL
 
-test_root="$(mktemp -d "${TMPDIR:-/tmp}/migration-writer-test.XXXXXX")"
-trap 'rm -rf -- "$test_root"' EXIT INT TERM
+identity_checker="$repo_root/scripts/verify-db-project-identity.py"
+if DB_TARGET=dev PGUSER=db_identity_reader PGPASSWORD=disposable-identity-reader-password \
+  python3 "$identity_checker" >/dev/null; then
+  :
+else
+  echo "The minimum Reader could not verify its database-side identity marker." >&2
+  exit 1
+fi
+if DB_TARGET=production PGUSER=db_identity_reader PGPASSWORD=disposable-identity-reader-password \
+  python3 "$identity_checker" >"$test_root/identity-mismatch.out" 2>&1; then
+  echo "A Dev marker unexpectedly passed the production identity check." >&2
+  exit 1
+fi
+if ! grep -Fq 'database marker is missing or mismatched' "$test_root/identity-mismatch.out"; then
+  echo "An identity mismatch did not fail with a sanitized result." >&2
+  exit 1
+fi
+psql "$MIGRATION_WRITER_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c "COMMENT ON DATABASE migration_writer_test IS NULL" >/dev/null
+if DB_TARGET=dev PGUSER=db_identity_reader PGPASSWORD=disposable-identity-reader-password \
+  python3 "$identity_checker" >"$test_root/identity-missing.out" 2>&1; then
+  echo "A missing identity marker unexpectedly passed verification." >&2
+  exit 1
+fi
+if ! grep -Fq 'database marker is missing or mismatched' "$test_root/identity-missing.out"; then
+  echo "A missing identity marker did not fail with a sanitized result." >&2
+  exit 1
+fi
+psql "$MIGRATION_WRITER_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c "COMMENT ON DATABASE migration_writer_test IS 'shared-supabase-db:target=dev;project_ref=irgahixsuvtopiwmtkku'" >/dev/null
+if PGUSER=db_identity_reader PGPASSWORD=disposable-identity-reader-password \
+  psql -X -w -v ON_ERROR_STOP=1 -Atqc \
+    "SELECT has_database_privilege(current_user, current_database(), 'CREATE')" | grep -qx t; then
+  echo "Identity probe Reader unexpectedly has database CREATE privilege." >&2
+  exit 1
+fi
+echo 'PASS: minimum Reader verifies a database comment identity marker read-only and rejects a wrong target'
+if DB_TARGET=dev python3 "$identity_checker" >/dev/null; then
+  echo 'PASS: disposable Writer credential verifies the same identity marker with a read-only transaction'
+else
+  echo "The disposable Writer credential could not verify the database-side identity marker." >&2
+  exit 1
+fi
+
 fixture="$test_root/project"
 mkdir -p "$fixture/supabase/migrations" "$test_root/bin"
 cat > "$fixture/supabase/config.toml" <<'TOML'
@@ -105,9 +155,11 @@ python3 "$apply_script" \
 
 column_exists="$(psql "$MIGRATION_WRITER_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -Atqc \
   "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = 'public.writer_probe'::regclass AND attname = 'label' AND NOT attisdropped)")"
+business_select="$(psql "$MIGRATION_WRITER_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -Atqc \
+  "SELECT has_table_privilege('db_identity_reader', 'public.writer_probe', 'SELECT')")"
 history="$(psql "$MIGRATION_WRITER_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -Atqc \
   "SELECT string_agg(version, ',' ORDER BY version) FROM supabase_migrations.schema_migrations")"
-if [[ "$column_exists" != t || "$history" != '20260101000000,20260102000000' ]]; then
+if [[ "$column_exists" != t || "$business_select" != f || "$history" != '20260101000000,20260102000000' ]]; then
   echo "PENDING migration was not fully applied to the disposable database." >&2
   exit 1
 fi

@@ -16,6 +16,8 @@ APPLY = ROOT / "scripts/apply-pending-migrations.py"
 ENV_CHECK = ROOT / "scripts/check-writer-environment.py"
 URL_WRITER = ROOT / "scripts/write-supabase-db-url.py"
 WORKFLOW_RESULT = ROOT / "scripts/evaluate-db-migration-workflow.py"
+IDENTITY_CHECK = ROOT / "scripts/verify-db-project-identity.py"
+DEV_WRITER_GATE = ROOT / "scripts/require-dev-writer-enabled.py"
 
 
 class MigrationWriterTests(unittest.TestCase):
@@ -399,6 +401,102 @@ class MigrationWriterTests(unittest.TestCase):
         ):
             self.assertNotEqual(failed.returncode, 0)
 
+    def test_dev_writer_gate_is_closed_until_explicit_cutover_enablement(self) -> None:
+        def check(value: str | None) -> subprocess.CompletedProcess[str]:
+            env = {**self.env}
+            if value is not None:
+                env["DEV_DB_WRITER_ENABLED"] = value
+            else:
+                env.pop("DEV_DB_WRITER_ENABLED", None)
+            return subprocess.run([sys.executable, str(DEV_WRITER_GATE)], env=env, capture_output=True, text=True)
+
+        self.assertEqual(check("true").returncode, 0)
+        for value in (None, "", "false", "TRUE", "yes"):
+            with self.subTest(value=value):
+                result = check(value)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("complete the documented cutover", result.stderr)
+
+    def test_database_identity_verifier_uses_read_only_query_and_fails_closed(self) -> None:
+        fake_psql = self.bin / "psql"
+        fake_psql.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "open(os.environ['IDENTITY_QUERY_CAPTURE'], 'w').write(sys.argv[-1])\n"
+            "if os.environ.get('IDENTITY_PSQL_FAIL') == '1':\n"
+            " sys.stderr.write('connection error ' + os.environ.get('PGPASSWORD', '') + '\\n'); raise SystemExit(2)\n"
+            "print(os.environ.get('IDENTITY_PSQL_OUTPUT', ''))\n",
+            encoding="utf-8",
+        )
+        fake_psql.chmod(0o700)
+        output_path = self.root / "identity-query.sql"
+        base = {
+            **self.env,
+            "DB_TARGET": "dev",
+            "PGPASSWORD": "identity-probe-secret",
+            "IDENTITY_QUERY_CAPTURE": str(output_path),
+            "IDENTITY_PSQL_OUTPUT": "shared-supabase-db:target=dev;project_ref=irgahixsuvtopiwmtkku",
+        }
+        success = subprocess.run([sys.executable, str(IDENTITY_CHECK)], env=base, capture_output=True, text=True)
+        self.assertEqual(success.returncode, 0, success.stderr)
+        self.assertIn("BEGIN TRANSACTION READ ONLY", output_path.read_text(encoding="utf-8"))
+        self.assertIn("pg_catalog.shobj_description", output_path.read_text(encoding="utf-8"))
+        self.assertNotIn("identity-probe-secret", success.stdout + success.stderr)
+
+        wrong_project = subprocess.run(
+            [sys.executable, str(IDENTITY_CHECK)],
+            env={**base, "IDENTITY_PSQL_OUTPUT": "shared-supabase-db:target=production;project_ref=fsrbddgyysssqzyullrc"},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(wrong_project.returncode, 1)
+        self.assertIn("missing or mismatched", wrong_project.stderr)
+        self.assertNotIn("identity-probe-secret", wrong_project.stdout + wrong_project.stderr)
+
+        unavailable = subprocess.run(
+            [sys.executable, str(IDENTITY_CHECK)],
+            env={**base, "IDENTITY_PSQL_FAIL": "1"},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(unavailable.returncode, 2)
+        self.assertNotIn("identity-probe-secret", unavailable.stdout + unavailable.stderr)
+
+    def test_dev_writer_environment_requires_main_policy_and_independent_reviewer(self) -> None:
+        from importlib.util import module_from_spec, spec_from_file_location
+
+        spec = spec_from_file_location("check_writer_environment_dev", ENV_CHECK)
+        assert spec and spec.loader
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        environment = {
+            "name": "development-db-apply",
+            "can_admins_bypass": False,
+            "deployment_branch_policy": {"custom_branch_policies": True, "protected_branches": False},
+            "protection_rules": [
+                {"id": 1, "type": "branch_policy"},
+                {
+                    "id": 2,
+                    "type": "required_reviewers",
+                    "reviewers": [{"type": "User", "reviewer": {"type": "User", "id": 8, "login": "reviewer"}}],
+                    "prevent_self_review": True,
+                },
+            ],
+        }
+        policy = {"total_count": 1, "branch_policies": [{"id": 1, "name": "main", "type": "branch"}]}
+        self.assertIn("self-approval prevented", module.validate(environment, policy, "dev"))
+        no_reviewer = {**environment, "protection_rules": [environment["protection_rules"][0]]}
+        with self.assertRaises(module.EnvironmentError):
+            module.validate(no_reviewer, policy, "dev")
+        self_approval_allowed = {
+            **environment,
+            "protection_rules": [environment["protection_rules"][0], {
+                **environment["protection_rules"][1], "prevent_self_review": False,
+            }],
+        }
+        with self.assertRaises(module.EnvironmentError):
+            module.validate(self_approval_allowed, policy, "dev")
+
     def test_writer_workflows_are_manual_target_specific_and_least_permission(self) -> None:
         dev = (ROOT / ".github/workflows/apply-dev-db-migrations.yml").read_text(encoding="utf-8")
         prod = (ROOT / ".github/workflows/apply-production-db-migrations.yml").read_text(encoding="utf-8")
@@ -418,6 +516,8 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertIn("scripts/validate-writer-db-env.py", reusable)
         self.assertIn("scripts/apply-pending-migrations.py", reusable)
         self.assertIn("scripts/evaluate-db-migration-workflow.py", reusable)
+        self.assertIn("scripts/verify-db-project-identity.py", reusable)
+        self.assertIn("scripts/require-dev-writer-enabled.py", reusable)
         self.assertIn("needs.preflight.outputs.state == 'IN_SYNC'", reusable)
         self.assertIn("needs.preflight.outputs.state == 'PENDING'", reusable)
         self.assertIn("needs.apply.result == 'failure'", reusable)
@@ -433,6 +533,27 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertNotIn("|| vars.PROD_SUPABASE_POOLER_HOST", reusable)
         self.assertNotIn("|| secrets.MIGRATION_READER_PASSWORD", reusable)
         self.assertNotIn("supabase db push", reusable)
+
+        probe = (ROOT / ".github/workflows/verify-dev-db-writer-connection.yml").read_text(encoding="utf-8")
+        self.assertIn("workflow_dispatch:", probe)
+        self.assertIn("contents: read", probe)
+        self.assertIn("actions: read", probe)
+        self.assertIn("development-db-check", probe)
+        self.assertIn("development-db-apply", probe)
+        self.assertIn("DEV_MIGRATION_SUPABASE_DB_PASSWORD", probe)
+        self.assertIn("scripts/verify-db-project-identity.py", probe)
+        self.assertIn("scripts/check-writer-environment.py", probe)
+        self.assertNotIn("supabase db push", probe)
+        self.assertNotIn("pull_request:", probe)
+        self.assertNotIn("push:", probe)
+        self.assertNotIn("contents: write", probe)
+        self.assertLess(probe.index("verify-reader:"), probe.index("verify-writer-environment:"))
+        self.assertLess(probe.index("verify-writer-environment:"), probe.index("verify-writer-credentials:"))
+        self.assertIn("DEV_DB_WRITER_ENABLED: ${{ vars.DEV_DB_WRITER_ENABLED }}", reusable)
+        self.assertLess(
+            reusable.index("Require explicit Dev Writer handoff enablement"),
+            reusable.index("Verify Dev database-side project identity as Writer"),
+        )
 
 
 if __name__ == "__main__":
