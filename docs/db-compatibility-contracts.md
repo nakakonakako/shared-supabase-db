@@ -30,14 +30,18 @@ UTF-8 JSONを使用する。未知のキー、未知のformat version、未対�
 - `format_version`: 検証器との互換形式。現在は整数`1`のみ。
 - `app_id`: lowercase kebab-caseの識別子。
 - `contract_version`: アプリ側契約のsemver。migration番号とは独立。
-- `capabilities.tables`: schema/name、`relation_kind`、必須カラムの`format_type`文字列・NULL許可、PK/UNIQUE/FK、RLS有効/強制、名前・command・roleを持つ必須policy、role別必須/禁止権限、必須trigger。
+- `capabilities.tables`: schema/name、`relation_kind`、必須カラムの`format_type`文字列・NULL許可、PK/UNIQUE/FK、RLS有効/強制、名前・command・roleを持つ必須policy、role別必須/禁止権限（PostgreSQL 17の`MAINTAIN`を含む）、必須trigger。
 - `capabilities.functions`: schema修飾済みシグネチャ、戻り型と`returns_set`、任意の全引数宣言（順序、名前、mode、型）、SECURITY INVOKER/DEFINER、必要な場合の`search_path`、EXECUTE許可/禁止role。
 - `capabilities.auth`: `auth.users`を参照する必須FKと必須Auth関数シグネチャ。
 - `capabilities.realtime`: 必須relationとRLS有効値、Realtime関数、必須trigger名と有効状態。
 
 列やtableは要求分のみを宣言する。追加column/table/functionがあっても、それ自体では不一致にならない。`relation_kind`は任意で、省略時は通常table（`pg_class.relkind='r'`）を要求する。明示値は`table`、`partitioned_table`、`view`、`materialized_view`。
 
-FKの`validated`も任意で、省略時は`true`（検証済み）を要求する。`NOT VALID`を一時的/意図的に許容する契約だけ`validated: false`を明記する。これにより検証状態を暗黙に許容しない。
+FKの`validated`も任意で、省略時は`true`（検証済み）を要求する。`NOT VALID`を一時的/意図的に許容する契約だけ`validated: false`を明記する。これにより検証状態を暗黙に許容しない。`ON DELETE SET NULL`のFKには任意の`set_null_columns`を指定できる。省略時は過去のv1契約との互換性を保つため`confdelsetcols`を照合せず、対象列を厳密には保証しない。指定時は`columns`の全列を同じ順序で列挙するとPostgreSQLの「全FK列をSET NULL」（`confdelsetcols IS NULL`）を要求し、それ以外の部分集合ならその列集合のみが対象であることを確認する。空配列、FK外の列、`ON DELETE SET NULL`以外への指定は拒否する。
+
+RLS policyの`name`はPostgreSQLの引用符付き識別子として扱い、大文字・空白・引用符を含められる。UTF-8で63 byteを超える名前とNUL文字は拒否する。検証器は`pg_policies`の名前、command、role集合を正確に比較し、名前をUTF-8 hexからDB内で復元するため、任意のpolicy名がSQL構文として解釈されない。`USING` / `WITH CHECK`式やpolicyの実際のアクセス結果は検査しない。
+
+table privilegeのenumにはPostgreSQL 17の`MAINTAIN`を含む。`allow` / `deny`は`pg_catalog.has_table_privilege`で実効権限を確認する。
 
 関数の`returns_set`は任意で、省略時は`false`（scalar）を要求する。`SETOF`は`true`を明記する。通常functionであることも必ず確認し、procedure等を同じsignature・戻り型と誤認しない。`RETURNS TABLE`など出力引数を持つ関数は、`returns`にPostgreSQLカタログ上の戻り型を記し、全`arguments`（出力列名・mode・型）を宣言して照合する。`record`戻り型は出力列を宣言しない契約を拒否する。戻り型と`proretset`は独立に照合し、未宣言のSETOFやPROCEDUREを成功扱いしない。
 
@@ -45,7 +49,7 @@ FKの`validated`も任意で、省略時は`true`（検証済み）を要求す�
 
 これらの追加キーはv1で任意とし、省略時の上記既定値で既存契約を維持する。必須要素が欠落、改名、型/NULL制約変更、制約・関数security/引数/戻り形式・実行権限・RLS catalog設定・trigger状態に不一致があれば失敗する。
 
-v1はFKの列、参照先、ON DELETE動作を検査する。チェック制約の任意式、列default、index形状、policyの`USING`/`WITH CHECK`式、関数本体や結果shapeは現状の対応範囲外。これらをcontractへ追加して成功扱いにはせず、必要になった時点で明示的にschema versionを拡張し、隔離テストを追加する。
+v1はFKの列、参照先、ON DELETE動作を検査し、`set_null_columns`がある場合は`pg_constraint.confdelsetcols`も照合する。省略時はこの列単位の動作を保証しない。チェック制約の任意式、列default、index形状、policyの`USING`/`WITH CHECK`式、関数本体や結果shapeは現状の対応範囲外。ロール所有者・属性・所属やschema ACLも保証しない。これらをcontractへ追加して成功扱いにはせず、必要になった時点で明示的にschema versionを拡張し、隔離テストを追加する。
 
 ## コマンドと結果の意味
 

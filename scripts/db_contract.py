@@ -27,7 +27,7 @@ CONTRACT_KEYS = {"format_version", "app_id", "contract_version", "capabilities"}
 CAPABILITY_KEYS = {"tables", "functions", "auth", "realtime"}
 TABLE_KEYS = {"schema", "name", "relation_kind", "columns", "constraints", "rls", "privileges", "triggers"}
 COLUMN_KEYS = {"name", "type", "nullable"}
-CONSTRAINT_KEYS = {"kind", "columns", "references", "on_delete", "validated"}
+CONSTRAINT_KEYS = {"kind", "columns", "references", "on_delete", "validated", "set_null_columns"}
 FK_KEYS = {"table", "columns"}
 RLS_KEYS = {"enabled", "forced", "policies"}
 POLICY_KEYS = {"name", "command", "roles"}
@@ -39,7 +39,7 @@ DEPENDENCY_KEYS = {"functions", "foreign_keys"}
 REALTIME_KEYS = {"relations", "functions", "triggers"}
 REALTIME_RELATION_KEYS = {"schema", "name", "rls_enabled"}
 ROLE_NAME = re.compile(r"^(?:public|[a-z_][a-z0-9_]{0,62})$")
-PRIVILEGES = {"SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"}
+PRIVILEGES = {"SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN"}
 POLICY_COMMANDS = {"ALL", "SELECT", "INSERT", "UPDATE", "DELETE"}
 TRIGGER_STATES = {"enabled", "disabled", "replica", "always"}
 
@@ -142,9 +142,17 @@ def validate_contract(data: Any) -> dict[str, Any]:
                 if len(ref["columns"]) != len(cols):
                     raise ContractError(f"{c_label} local and referenced column counts differ")
                 _enum(constraint.get("on_delete", "no_action"), f"{c_label}.on_delete", {"no_action", "restrict", "cascade", "set_null", "set_default"})
+                if "set_null_columns" in constraint:
+                    set_null_columns = _strings(constraint["set_null_columns"], f"{c_label}.set_null_columns", IDENTIFIER)
+                    if constraint.get("on_delete", "no_action") != "set_null":
+                        raise ContractError(f"{c_label}.set_null_columns requires on_delete=set_null")
+                    if not set(set_null_columns) <= set(cols):
+                        raise ContractError(f"{c_label}.set_null_columns must be a subset of FK columns")
+                    if set(set_null_columns) == set(cols) and set_null_columns != cols:
+                        raise ContractError(f"{c_label}.set_null_columns must follow FK column order when listing all columns")
                 if "validated" in constraint and not isinstance(constraint["validated"], bool):
                     raise ContractError(f"{c_label}.validated must be boolean")
-            elif any(key in constraint for key in ("references", "on_delete", "validated")):
+            elif any(key in constraint for key in ("references", "on_delete", "validated", "set_null_columns")):
                 raise ContractError(f"{c_label} has FK-only fields on a non-FK constraint")
 
         if "rls" in table:
@@ -155,7 +163,7 @@ def validate_contract(data: Any) -> dict[str, Any]:
             for p_index, raw_policy in enumerate(rls.get("policies", [])):
                 p_label = f"{label}.rls.policies[{p_index}]"
                 policy = _object(raw_policy, p_label, POLICY_KEYS, POLICY_KEYS)
-                _identifier(policy["name"], f"{p_label}.name")
+                _policy_name(policy["name"], f"{p_label}.name")
                 _enum(policy["command"], f"{p_label}.command", POLICY_COMMANDS)
                 _strings(policy["roles"], f"{p_label}.roles", ROLE_NAME)
 
@@ -218,7 +226,7 @@ def validate_contract(data: Any) -> dict[str, Any]:
             _array(dep.get("functions", []), "auth.functions")
             for fk_index, raw_fk in enumerate(dep.get("foreign_keys", [])):
                 label = f"auth.foreign_keys[{fk_index}]"
-                fk = _object(raw_fk, label, {"table", "columns", "references", "referenced_columns", "on_delete", "validated"}, {"table", "columns", "references"})
+                fk = _object(raw_fk, label, {"table", "columns", "references", "referenced_columns", "on_delete", "validated", "set_null_columns"}, {"table", "columns", "references"})
                 _qualified_table(fk["table"], f"{label}.table")
                 _strings(fk["columns"], f"{label}.columns", IDENTIFIER)
                 _qualified_table(fk["references"], f"{label}.references")
@@ -226,6 +234,12 @@ def validate_contract(data: Any) -> dict[str, Any]:
                 if fk["references"] != "auth.users":
                     raise ContractError(f"{label}.references must be auth.users in v1")
                 _enum(fk.get("on_delete", "no_action"), f"{label}.on_delete", {"no_action", "restrict", "cascade", "set_null", "set_default"})
+                if "set_null_columns" in fk:
+                    set_null_columns = _strings(fk["set_null_columns"], f"{label}.set_null_columns", IDENTIFIER)
+                    if fk.get("on_delete", "no_action") != "set_null" or not set(set_null_columns) <= set(fk["columns"]):
+                        raise ContractError(f"{label}.set_null_columns must be a subset of columns with on_delete=set_null")
+                    if set(set_null_columns) == set(fk["columns"]) and set_null_columns != fk["columns"]:
+                        raise ContractError(f"{label}.set_null_columns must follow FK column order when listing all columns")
                 if "validated" in fk and not isinstance(fk["validated"], bool):
                     raise ContractError(f"{label}.validated must be boolean")
             _check_dependency_functions(dep, "auth")
@@ -276,6 +290,25 @@ def _literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _utf8_text(value: str) -> str:
+    """Render arbitrary UTF-8 text without embedding it in SQL source."""
+    return f"pg_catalog.convert_from(pg_catalog.decode('{value.encode('utf-8').hex()}','hex'),'UTF8')"
+
+
+def _policy_name(value: Any, label: str) -> str:
+    # PostgreSQL identifiers are limited to NAMEDATALEN - 1 bytes (63 by default).
+    # pg_policies exposes the stored, possibly quoted identifier as text.
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ContractError(f"{label} must be a non-empty PostgreSQL identifier")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ContractError(f"{label} must be valid UTF-8") from exc
+    if len(encoded) > 63:
+        raise ContractError(f"{label} exceeds PostgreSQL's 63-byte identifier limit")
+    return value
+
+
 def _name_array(names: list[str]) -> str:
     return "ARRAY[" + ",".join(_literal(name) for name in names) + "]::name[]"
 
@@ -306,6 +339,13 @@ def _constraint_check(schema: str, table: str, spec: dict[str, Any]) -> str:
         delete_code = {"no_action": "a", "restrict": "r", "cascade": "c", "set_null": "n", "set_default": "d"}[spec.get("on_delete", "no_action")]
         predicates.append(f"c.confdeltype={_literal(delete_code)}")
         predicates.append(f"c.convalidated IS {'TRUE' if spec.get('validated', True) else 'FALSE'}")
+        if "set_null_columns" in spec:
+            set_null_columns = spec["set_null_columns"]
+            if set_null_columns == spec["columns"]:
+                predicates.append("c.confdelsetcols IS NULL")
+            else:
+                set_null_cols = "ARRAY(SELECT a.attname FROM unnest(c.confdelsetcols) WITH ORDINALITY k(attnum,ord) JOIN pg_catalog.pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum ORDER BY a.attname)::name[]"
+                predicates.append(f"{set_null_cols}={_name_array(sorted(set_null_columns))}")
         joins = "JOIN pg_catalog.pg_class rt ON rt.oid=c.confrelid JOIN pg_catalog.pg_namespace rn ON rn.oid=rt.relnamespace"
     else:
         joins = ""
@@ -318,7 +358,7 @@ def _policy_check(schema: str, table: str, policy: dict[str, Any]) -> str:
     return f"""EXISTS (
       SELECT 1 FROM pg_catalog.pg_policies p
       WHERE p.schemaname={_literal(schema)} AND p.tablename={_literal(table)}
-        AND p.policyname={_literal(policy['name'])} AND p.cmd={_literal(command)}
+        AND p.policyname={_utf8_text(policy['name'])} AND p.cmd={_literal(command)}
         AND ARRAY(SELECT unnest(p.roles) ORDER BY 1) = ARRAY(SELECT unnest({roles}) ORDER BY 1)
     )"""
 
@@ -380,8 +420,8 @@ def build_checks(contract: dict[str, Any]) -> list[tuple[str, str]]:
             checks.append((f"table {qualified} RLS enabled", f"EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname={_literal(schema)} AND c.relname={_literal(name)} AND c.relrowsecurity IS {'TRUE' if rls['enabled'] else 'FALSE'})"))
             if "forced" in rls:
                 checks.append((f"table {qualified} FORCE RLS", f"EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname={_literal(schema)} AND c.relname={_literal(name)} AND c.relforcerowsecurity IS {'TRUE' if rls['forced'] else 'FALSE'})"))
-            for policy in rls.get("policies", []):
-                checks.append((f"policy {qualified}.{policy['name']}", _policy_check(schema, name, policy)))
+            for policy_index, policy in enumerate(rls.get("policies", [])):
+                checks.append((f"policy {qualified} metadata #{policy_index + 1}", _policy_check(schema, name, policy)))
         for entry in table.get("privileges", []):
             for privilege in entry["allow"]:
                 checks.append((f"table {qualified} {entry['role']} {privilege} allowed", _privilege_check(schema, name, entry, privilege, True)))
@@ -395,6 +435,8 @@ def build_checks(contract: dict[str, Any]) -> list[tuple[str, str]]:
         local_schema, local_table = _qualified_table(fk["table"], "auth.foreign_keys.table")
         ref_schema, ref_table = _qualified_table(fk["references"], "auth.foreign_keys.references")
         spec = {"kind": "foreign_key", "columns": fk["columns"], "references": {"table": f"{ref_schema}.{ref_table}", "columns": fk.get("referenced_columns", ["id"])}, "on_delete": fk.get("on_delete", "no_action"), "validated": fk.get("validated", True)}
+        if "set_null_columns" in fk:
+            spec["set_null_columns"] = fk["set_null_columns"]
         checks.append((f"Auth FK {fk['table']} -> {fk['references']}", _constraint_check(local_schema, local_table, spec)))
     for section in ("auth", "realtime"):
         dep = caps.get(section, {})
