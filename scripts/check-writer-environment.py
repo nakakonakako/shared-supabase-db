@@ -90,36 +90,42 @@ def validate(environment: dict, branch_policy: dict, target: str) -> str:
         for rule in rules
         if isinstance(rule, dict) and rule.get("type") == "required_reviewers"
     ]
+    if any(
+        not isinstance(rule.get("reviewers"), list)
+        or type(rule.get("prevent_self_review")) is not bool
+        for rule in reviewer_rules
+    ):
+        raise EnvironmentError("Writer reviewer protection metadata is incomplete")
+    if any(
+        not isinstance(reviewer, dict)
+        or reviewer.get("type") not in {"User", "Team"}
+        or not isinstance(reviewer.get("reviewer"), dict)
+        or type(reviewer["reviewer"].get("id")) is not int
+        or reviewer["reviewer"].get("type", reviewer["type"]) != reviewer["type"]
+        or (
+            reviewer["type"] == "User"
+            and (not isinstance(reviewer["reviewer"].get("login"), str) or not reviewer["reviewer"]["login"])
+        )
+        or (
+            reviewer["type"] == "Team"
+            and not any(
+                isinstance(reviewer["reviewer"].get(key), str) and reviewer["reviewer"][key]
+                for key in ("slug", "name")
+            )
+        )
+        for rule in reviewer_rules
+        for reviewer in rule["reviewers"]
+    ):
+        raise EnvironmentError("Writer reviewer metadata is incomplete")
+    if target == "dev":
+        if not reviewer_rules or not any(rule["reviewers"] for rule in reviewer_rules):
+            raise EnvironmentError("Dev Writer Environment requires at least one reviewer")
+        if not any(rule["reviewers"] and rule["prevent_self_review"] is True for rule in reviewer_rules):
+            raise EnvironmentError("Dev Writer Environment must prevent self-approval")
+        return "Dev Writer Environment protection valid (main-only, reviewer approval, self-approval prevented)"
     if target == "production":
-        if (
-            not reviewer_rules
-            or any(not isinstance(rule.get("reviewers"), list) for rule in reviewer_rules)
-            or not any(rule.get("reviewers") for rule in reviewer_rules)
-        ):
+        if not reviewer_rules or not any(rule["reviewers"] for rule in reviewer_rules):
             raise EnvironmentError("production Writer Environment requires at least one reviewer")
-        if any(
-            not isinstance(reviewer, dict)
-            or reviewer.get("type") not in {"User", "Team"}
-            or not isinstance(reviewer.get("reviewer"), dict)
-            or type(reviewer["reviewer"].get("id")) is not int
-            or reviewer["reviewer"].get("type", reviewer["type"]) != reviewer["type"]
-            or (
-                reviewer["type"] == "User"
-                and (not isinstance(reviewer["reviewer"].get("login"), str) or not reviewer["reviewer"]["login"])
-            )
-            or (
-                reviewer["type"] == "Team"
-                and not any(
-                    isinstance(reviewer["reviewer"].get(key), str) and reviewer["reviewer"][key]
-                    for key in ("slug", "name")
-                )
-            )
-            for rule in reviewer_rules
-            for reviewer in rule["reviewers"]
-        ):
-            raise EnvironmentError("production Writer reviewer metadata is incomplete")
-        if any(type(rule.get("prevent_self_review")) is not bool for rule in reviewer_rules):
-            raise EnvironmentError("production Writer reviewer protection metadata is incomplete")
         if any(rule.get("prevent_self_review") is True for rule in reviewer_rules):
             return "production Writer Environment protection valid (self-review is prevented)"
         return "production Writer Environment protection valid (reviewer gate allows self-approval)"
