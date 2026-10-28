@@ -34,12 +34,49 @@
           { "role": "authenticated", "allow": ["SELECT", "INSERT", "UPDATE", "DELETE"], "deny": ["TRUNCATE"] },
           { "role": "anon", "allow": [], "deny": ["SELECT", "INSERT", "UPDATE", "DELETE"] }
         ]
+      },
+      {
+        "schema": "public",
+        "name": "relation_probe",
+        "columns": [{ "name": "id", "type": "uuid", "nullable": true }]
       }
     ],
     "functions": [
       {
         "signature": "public.fixture_lookup(uuid)",
         "returns": "text",
+        "returns_set": false,
+        "arguments": [{ "name": "p_user_id", "mode": "IN", "type": "uuid" }],
+        "security": "invoker",
+        "search_path": "",
+        "execute": { "allow": ["authenticated"], "deny": ["public", "anon"] }
+      },
+      {
+        "signature": "public.fixture_mode(uuid)",
+        "returns": "uuid",
+        "arguments": [{ "name": "p_user_id", "mode": "IN", "type": "uuid" }],
+        "security": "invoker",
+        "execute": { "allow": ["authenticated"], "deny": ["public", "anon"] }
+      },
+      {
+        "signature": "public.fixture_unnamed(uuid)",
+        "returns": "uuid",
+        "arguments": [{ "name": null, "mode": "IN", "type": "uuid" }],
+        "security": "invoker",
+        "execute": { "allow": ["authenticated"], "deny": ["public", "anon"] }
+      },
+      {
+        "signature": "public.fixture_rows()",
+        "returns": "uuid",
+        "returns_set": true,
+        "arguments": [{ "name": "row_id", "mode": "TABLE", "type": "uuid" }],
+        "security": "invoker",
+        "execute": { "allow": ["authenticated"], "deny": ["public", "anon"] }
+      },
+      {
+        "signature": "public.fixture_procedure_probe()",
+        "returns": "void",
+        "arguments": [],
         "security": "invoker",
         "search_path": "",
         "execute": { "allow": ["authenticated"], "deny": ["public", "anon"] }

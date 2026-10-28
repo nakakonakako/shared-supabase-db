@@ -30,12 +30,20 @@ UTF-8 JSONを使用する。未知のキー、未知のformat version、未対�
 - `format_version`: 検証器との互換形式。現在は整数`1`のみ。
 - `app_id`: lowercase kebab-caseの識別子。
 - `contract_version`: アプリ側契約のsemver。migration番号とは独立。
-- `capabilities.tables`: schema/name、必須カラムの`format_type`文字列・NULL許可、PK/UNIQUE/FK、RLS有効/強制、名前・command・roleを持つ必須policy、role別必須/禁止権限、必須trigger。
-- `capabilities.functions`: schema修飾済みシグネチャ、戻り型、SECURITY INVOKER/DEFINER、必要な場合の`search_path`、EXECUTE許可/禁止role。
+- `capabilities.tables`: schema/name、`relation_kind`、必須カラムの`format_type`文字列・NULL許可、PK/UNIQUE/FK、RLS有効/強制、名前・command・roleを持つ必須policy、role別必須/禁止権限、必須trigger。
+- `capabilities.functions`: schema修飾済みシグネチャ、戻り型と`returns_set`、任意の全引数宣言（順序、名前、mode、型）、SECURITY INVOKER/DEFINER、必要な場合の`search_path`、EXECUTE許可/禁止role。
 - `capabilities.auth`: `auth.users`を参照する必須FKと必須Auth関数シグネチャ。
 - `capabilities.realtime`: 必須relationとRLS有効値、Realtime関数、必須trigger名と有効状態。
 
-列やtableは要求分のみを宣言する。追加column/table/functionがあっても、それ自体では不一致にならない。必須要素が欠落、改名、型/NULL制約変更、制約・関数security・実行権限・RLS catalog設定・trigger状態に不一致があれば失敗する。
+列やtableは要求分のみを宣言する。追加column/table/functionがあっても、それ自体では不一致にならない。`relation_kind`は任意で、省略時は通常table（`pg_class.relkind='r'`）を要求する。明示値は`table`、`partitioned_table`、`view`、`materialized_view`。
+
+FKの`validated`も任意で、省略時は`true`（検証済み）を要求する。`NOT VALID`を一時的/意図的に許容する契約だけ`validated: false`を明記する。これにより検証状態を暗黙に許容しない。
+
+関数の`returns_set`は任意で、省略時は`false`（scalar）を要求する。`SETOF`は`true`を明記する。通常functionであることも必ず確認し、procedure等を同じsignature・戻り型と誤認しない。`RETURNS TABLE`など出力引数を持つ関数は、`returns`にPostgreSQLカタログ上の戻り型を記し、全`arguments`（出力列名・mode・型）を宣言して照合する。`record`戻り型は出力列を宣言しない契約を拒否する。戻り型と`proretset`は独立に照合し、未宣言のSETOFやPROCEDUREを成功扱いしない。
+
+`arguments`は任意。指定する場合は**IN/OUT/INOUT/VARIADIC/TABLEを含む全引数**を宣言し、順序・名前・mode・型をカタログと完全照合する。`name: null`はその位置の引数に名前がないことを要求する。名前付き引数が一つもない関数ではPostgreSQLの`proargnames IS NULL`を期待する。`arguments`自体を省略した場合、引数名は契約条件に含めず、`proargmodes IS NULL`（すべてIN引数）だけを要求する。Supabase RPCなど名前付き引数の互換性が必要な関数では必ず宣言する。
+
+これらの追加キーはv1で任意とし、省略時の上記既定値で既存契約を維持する。必須要素が欠落、改名、型/NULL制約変更、制約・関数security/引数/戻り形式・実行権限・RLS catalog設定・trigger状態に不一致があれば失敗する。
 
 v1はFKの列、参照先、ON DELETE動作を検査する。チェック制約の任意式、列default、index形状、policyの`USING`/`WITH CHECK`式、関数本体や結果shapeは現状の対応範囲外。これらをcontractへ追加して成功扱いにはせず、必要になった時点で明示的にschema versionを拡張し、隔離テストを追加する。
 

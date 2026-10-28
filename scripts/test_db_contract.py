@@ -31,6 +31,13 @@ class DbContractTests(unittest.TestCase):
         self.assertTrue(any("constraint public.fixture_items" in label for label in labels))
         self.assertTrue(any("policy public.fixture_items" in label for label in labels))
         self.assertTrue(any("function public.fixture_lookup(uuid)" in label for label in labels))
+        self.assertTrue(any("argument names" in label for label in labels))
+        self.assertTrue(any("argument modes" in label for label in labels))
+        self.assertTrue(any("argument types" in label for label in labels))
+        self.assertTrue(any("set-returning mode" in label for label in labels))
+        self.assertTrue(any("ordinary function" in label for label in labels))
+        self.assertTrue(any("relation public.relation_probe kind=table" in label for label in labels))
+        self.assertTrue(any("convalidated" in query for _, query in checks))
         self.assertTrue(any("Auth FK" in label for label in labels))
         self.assertTrue(any("Realtime relation" in label for label in labels))
         self.assertTrue(any("Realtime trigger" in label for label in labels))
@@ -58,6 +65,17 @@ class DbContractTests(unittest.TestCase):
         malformed_enum = copy.deepcopy(self.valid)
         malformed_enum["capabilities"]["functions"][0]["security"] = ["definer"]
         invalids.append(malformed_enum)
+        malformed_arg_mode = copy.deepcopy(self.valid)
+        malformed_arg_mode["capabilities"]["functions"][0]["arguments"][0]["mode"] = "INPUT"
+        invalids.append(malformed_arg_mode)
+        missing_record_shape = copy.deepcopy(self.valid)
+        missing_record_shape["capabilities"]["functions"].append(
+            {"signature": "public.record_result()", "returns": "record", "security": "invoker", "execute": {"allow": [], "deny": []}}
+        )
+        invalids.append(missing_record_shape)
+        invalid_fk_validation = copy.deepcopy(self.valid)
+        invalid_fk_validation["capabilities"]["tables"][0]["constraints"][2]["validated"] = "false"
+        invalids.append(invalid_fk_validation)
         for contract in invalids:
             with self.subTest(contract=contract):
                 with self.assertRaises(ContractError):
@@ -73,7 +91,7 @@ class DbContractTests(unittest.TestCase):
             {"schema": "public", "name": "unrelated_new_table", "columns": [{"name": "id", "type": "uuid", "nullable": False}]}
         )
         checks_after = build_checks(validate_contract(extended))
-        self.assertEqual(len(checks_after), len(checks_before) + 3)
+        self.assertEqual(len(checks_after), len(checks_before) + 4)
         self.assertTrue(all("unrelated_new_table" not in label for label, _ in checks_before))
 
     def test_invalid_contract_cli_does_not_connect(self) -> None:
@@ -129,6 +147,17 @@ class DbContractTests(unittest.TestCase):
             self.assertTrue(any(not result.passed and "type/nullability" in result.label for result in wrong_nullability))
             bad_rpc = verify_catalog(self.valid, psql=str(fake), env={**env, "FAKE_FAIL_MATCH": "prosecdef"})
             self.assertTrue(any(not result.passed and "security mode" in result.label for result in bad_rpc))
+            for needle, label in (
+                ("proargnames", "argument names"),
+                ("proargmodes", "argument modes"),
+                ("proretset", "set-returning mode"),
+                ("prokind='f'", "ordinary function"),
+                ("convalidated", "constraint public.fixture_items"),
+                ("c.relkind", "relation public.relation_probe"),
+            ):
+                with self.subTest(catalog_property=needle):
+                    drift = verify_catalog(self.valid, psql=str(fake), env={**env, "FAKE_FAIL_MATCH": needle})
+                    self.assertTrue(any(not result.passed and label in result.label for result in drift))
             bad_grant = verify_catalog(self.valid, psql=str(fake), env={**env, "FAKE_FAIL_MATCH": "has_table_privilege"})
             self.assertTrue(any(not result.passed and "allowed" in result.label for result in bad_grant))
 
@@ -136,12 +165,6 @@ class DbContractTests(unittest.TestCase):
                 verify_catalog(self.valid, psql=str(fake), env={**env, "FAKE_PSQL_ERROR": "1"})
             with self.assertRaises(VerificationError):
                 verify_catalog(self.valid, psql=str(fake), env={**env, "FAKE_PSQL_OUTPUT": "weird"})
-
-            cli_env = {**env, "PATH": f"{temp}{os.pathsep}{os.environ['PATH']}", "FAKE_PSQL_ERROR": "1"}
-            cli = subprocess.run([sys.executable, str(CLI), str(FIXTURE)], env=cli_env, capture_output=True, text=True)
-            self.assertEqual(cli.returncode, 2)
-            self.assertIn("catalog verification failed or was inconclusive", cli.stderr)
-            self.assertNotIn("disposable", cli.stdout + cli.stderr)
 
             cli_env = {**env, "PATH": f"{temp}{os.pathsep}{os.environ['PATH']}", "FAKE_PSQL_ERROR": "1"}
             cli = subprocess.run([sys.executable, str(CLI), str(FIXTURE)], env=cli_env, capture_output=True, text=True)

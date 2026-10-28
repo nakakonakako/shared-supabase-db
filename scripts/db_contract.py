@@ -25,15 +25,16 @@ FUNCTION = re.compile(r"^(?:[a-z_][a-z0-9_]*\.)+[a-z_][a-z0-9_]*\([^;]*\)$")
 SHA = re.compile(r"^[0-9a-f]{40,64}$")
 CONTRACT_KEYS = {"format_version", "app_id", "contract_version", "capabilities"}
 CAPABILITY_KEYS = {"tables", "functions", "auth", "realtime"}
-TABLE_KEYS = {"schema", "name", "columns", "constraints", "rls", "privileges", "triggers"}
+TABLE_KEYS = {"schema", "name", "relation_kind", "columns", "constraints", "rls", "privileges", "triggers"}
 COLUMN_KEYS = {"name", "type", "nullable"}
-CONSTRAINT_KEYS = {"kind", "columns", "references", "on_delete"}
+CONSTRAINT_KEYS = {"kind", "columns", "references", "on_delete", "validated"}
 FK_KEYS = {"table", "columns"}
 RLS_KEYS = {"enabled", "forced", "policies"}
 POLICY_KEYS = {"name", "command", "roles"}
 PRIVILEGE_KEYS = {"role", "allow", "deny"}
 TRIGGER_KEYS = {"name", "enabled"}
-FUNCTION_KEYS = {"signature", "returns", "security", "search_path", "execute"}
+FUNCTION_KEYS = {"signature", "returns", "returns_set", "arguments", "security", "search_path", "execute"}
+ARGUMENT_KEYS = {"name", "mode", "type"}
 DEPENDENCY_KEYS = {"functions", "foreign_keys"}
 REALTIME_KEYS = {"relations", "functions", "triggers"}
 REALTIME_RELATION_KEYS = {"schema", "name", "rls_enabled"}
@@ -108,6 +109,8 @@ def validate_contract(data: Any) -> dict[str, Any]:
         for optional_array in ("constraints", "privileges", "triggers"):
             _array(table.get(optional_array, []), f"{label}.{optional_array}")
         schema, name = _identifier(table["schema"], f"{label}.schema"), _identifier(table["name"], f"{label}.name")
+        if "relation_kind" in table:
+            _enum(table["relation_kind"], f"{label}.relation_kind", {"table", "partitioned_table", "view", "materialized_view"})
         if (schema, name) in seen_tables:
             raise ContractError(f"{label} duplicates a table")
         seen_tables.add((schema, name))
@@ -139,7 +142,9 @@ def validate_contract(data: Any) -> dict[str, Any]:
                 if len(ref["columns"]) != len(cols):
                     raise ContractError(f"{c_label} local and referenced column counts differ")
                 _enum(constraint.get("on_delete", "no_action"), f"{c_label}.on_delete", {"no_action", "restrict", "cascade", "set_null", "set_default"})
-            elif "references" in constraint or "on_delete" in constraint:
+                if "validated" in constraint and not isinstance(constraint["validated"], bool):
+                    raise ContractError(f"{c_label}.validated must be boolean")
+            elif any(key in constraint for key in ("references", "on_delete", "validated")):
                 raise ContractError(f"{c_label} has FK-only fields on a non-FK constraint")
 
         if "rls" in table:
@@ -181,6 +186,22 @@ def validate_contract(data: Any) -> dict[str, Any]:
         seen_functions.add(function["signature"])
         if not isinstance(function["returns"], str) or not function["returns"] or any(ch in function["returns"] for ch in ";'\n\r"):
             raise ContractError(f"{label}.returns is invalid")
+        if "returns_set" in function and not isinstance(function["returns_set"], bool):
+            raise ContractError(f"{label}.returns_set must be boolean")
+        if function["returns"] == "record" and "arguments" not in function:
+            raise ContractError(f"{label}.arguments is required to verify a record return shape")
+        if "arguments" in function:
+            arguments = _array(function["arguments"], f"{label}.arguments")
+            for arg_index, raw_argument in enumerate(arguments):
+                arg_label = f"{label}.arguments[{arg_index}]"
+                argument = _object(raw_argument, arg_label, ARGUMENT_KEYS, ARGUMENT_KEYS)
+                if argument["name"] is not None:
+                    _identifier(argument["name"], f"{arg_label}.name")
+                _enum(argument["mode"], f"{arg_label}.mode", {"IN", "OUT", "INOUT", "VARIADIC", "TABLE"})
+                if not isinstance(argument["type"], str) or not argument["type"] or any(ch in argument["type"] for ch in ";'\n\r"):
+                    raise ContractError(f"{arg_label}.type is invalid")
+            if function["returns"] == "record" and not any(argument["mode"] in {"OUT", "TABLE"} for argument in arguments):
+                raise ContractError(f"{label}.record return requires declared OUT/TABLE columns")
         _enum(function["security"], f"{label}.security", {"invoker", "definer"})
         if "search_path" in function and not isinstance(function["search_path"], str):
             raise ContractError(f"{label}.search_path must be a string")
@@ -197,7 +218,7 @@ def validate_contract(data: Any) -> dict[str, Any]:
             _array(dep.get("functions", []), "auth.functions")
             for fk_index, raw_fk in enumerate(dep.get("foreign_keys", [])):
                 label = f"auth.foreign_keys[{fk_index}]"
-                fk = _object(raw_fk, label, {"table", "columns", "references", "referenced_columns", "on_delete"}, {"table", "columns", "references"})
+                fk = _object(raw_fk, label, {"table", "columns", "references", "referenced_columns", "on_delete", "validated"}, {"table", "columns", "references"})
                 _qualified_table(fk["table"], f"{label}.table")
                 _strings(fk["columns"], f"{label}.columns", IDENTIFIER)
                 _qualified_table(fk["references"], f"{label}.references")
@@ -205,6 +226,8 @@ def validate_contract(data: Any) -> dict[str, Any]:
                 if fk["references"] != "auth.users":
                     raise ContractError(f"{label}.references must be auth.users in v1")
                 _enum(fk.get("on_delete", "no_action"), f"{label}.on_delete", {"no_action", "restrict", "cascade", "set_null", "set_default"})
+                if "validated" in fk and not isinstance(fk["validated"], bool):
+                    raise ContractError(f"{label}.validated must be boolean")
             _check_dependency_functions(dep, "auth")
         else:
             dep = _object(caps[section], "capabilities.realtime", REALTIME_KEYS, set())
@@ -282,6 +305,7 @@ def _constraint_check(schema: str, table: str, spec: dict[str, Any]) -> str:
         predicates.extend([f"rn.nspname={_literal(ref_schema)}", f"rt.relname={_literal(ref_table)}", f"{remote_cols}={ref_cols}"])
         delete_code = {"no_action": "a", "restrict": "r", "cascade": "c", "set_null": "n", "set_default": "d"}[spec.get("on_delete", "no_action")]
         predicates.append(f"c.confdeltype={_literal(delete_code)}")
+        predicates.append(f"c.convalidated IS {'TRUE' if spec.get('validated', True) else 'FALSE'}")
         joins = "JOIN pg_catalog.pg_class rt ON rt.oid=c.confrelid JOIN pg_catalog.pg_namespace rn ON rn.oid=rt.relnamespace"
     else:
         joins = ""
@@ -308,8 +332,24 @@ def _function_check(spec: dict[str, Any]) -> list[tuple[str, str]]:
     signature = spec["signature"]
     fn = f"pg_catalog.to_regprocedure({_literal(signature)})"
     checks = [(f"function {signature} exists", f"{fn} IS NOT NULL")]
+    checks.append((f"function {signature} ordinary function", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND p.prokind='f')"))
     checks.append((f"function {signature} return type", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND pg_catalog.format_type(p.prorettype,NULL)={_literal(spec['returns'])})"))
+    checks.append((f"function {signature} set-returning mode", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND p.proretset IS {'TRUE' if spec.get('returns_set', False) else 'FALSE'})"))
     checks.append((f"function {signature} security mode", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND p.prosecdef IS {'TRUE' if spec['security']=='definer' else 'FALSE'})"))
+    if "arguments" in spec:
+        arguments = spec["arguments"]
+        expected_names = [argument["name"] for argument in arguments]
+        names_expr = "NULL::text[]" if not any(expected_names) else "ARRAY[" + ",".join("NULL::text" if name is None else f"{_literal(name)}::text" for name in expected_names) + "]::text[]"
+        mode_codes = {"IN": "i", "OUT": "o", "INOUT": "b", "VARIADIC": "v", "TABLE": "t"}
+        expected_modes = "ARRAY[" + ",".join(f"{_literal(mode_codes[argument['mode']])}::\"char\"" for argument in arguments) + "]::\"char\"[]"
+        expected_types = "ARRAY[" + ",".join(f"{_literal(argument['type'])}::regtype::oid" for argument in arguments) + "]::oid[]"
+        checks.append((f"function {signature} argument names", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND p.proargnames IS NOT DISTINCT FROM {names_expr})"))
+        checks.append((f"function {signature} argument modes", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND COALESCE(p.proargmodes, pg_catalog.array_fill('i'::\"char\", ARRAY[p.pronargs])) IS NOT DISTINCT FROM {expected_modes})"))
+        checks.append((f"function {signature} argument types", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND ARRAY(SELECT unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[]))) IS NOT DISTINCT FROM {expected_types})"))
+    else:
+        # Without an argument declaration, only all-IN functions are verifiable.
+        # Their names are intentionally not part of the consumer contract.
+        checks.append((f"function {signature} has no output arguments", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND p.proargmodes IS NULL)"))
     if "search_path" in spec:
         expected = "ARRAY['search_path=\"\"']::text[]" if spec["search_path"] == "" else f"ARRAY[{_literal('search_path=' + spec['search_path'])}]::text[]"
         checks.append((f"function {signature} search_path", f"EXISTS (SELECT 1 FROM pg_catalog.pg_proc p WHERE p.oid={fn} AND p.proconfig={expected})"))
@@ -328,6 +368,9 @@ def build_checks(contract: dict[str, Any]) -> list[tuple[str, str]]:
         schema, name = table["schema"], table["name"]
         qualified = f"{schema}.{name}"
         checks.append((f"table {qualified} exists", f"pg_catalog.to_regclass({_literal(qualified)}) IS NOT NULL"))
+        relkinds = {"table": "r", "partitioned_table": "p", "view": "v", "materialized_view": "m"}
+        relation_kind = table.get("relation_kind", "table")
+        checks.append((f"relation {qualified} kind={relation_kind}", f"EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname={_literal(schema)} AND c.relname={_literal(name)} AND c.relkind={_literal(relkinds[relation_kind])})"))
         for col in table["columns"]:
             checks.append((f"column {qualified}.{col['name']} type/nullability", _column_check(schema, name, col)))
         for constraint in table.get("constraints", []):
@@ -351,7 +394,7 @@ def build_checks(contract: dict[str, Any]) -> list[tuple[str, str]]:
     for fk in caps.get("auth", {}).get("foreign_keys", []):
         local_schema, local_table = _qualified_table(fk["table"], "auth.foreign_keys.table")
         ref_schema, ref_table = _qualified_table(fk["references"], "auth.foreign_keys.references")
-        spec = {"kind": "foreign_key", "columns": fk["columns"], "references": {"table": f"{ref_schema}.{ref_table}", "columns": fk.get("referenced_columns", ["id"])}, "on_delete": fk.get("on_delete", "no_action")}
+        spec = {"kind": "foreign_key", "columns": fk["columns"], "references": {"table": f"{ref_schema}.{ref_table}", "columns": fk.get("referenced_columns", ["id"])}, "on_delete": fk.get("on_delete", "no_action"), "validated": fk.get("validated", True)}
         checks.append((f"Auth FK {fk['table']} -> {fk['references']}", _constraint_check(local_schema, local_table, spec)))
     for section in ("auth", "realtime"):
         dep = caps.get(section, {})
