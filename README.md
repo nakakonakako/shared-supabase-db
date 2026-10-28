@@ -19,7 +19,7 @@ npm ci
 npm run check
 ```
 
-SQLテスト4系統は専用の新しいPostgreSQLクラスター上で実行する。ReaderテストはPostgreSQL 17コンテナを自動起動する。AI quotaテストはクラスター全体にロールを作るため、他のSQLテストともクラスターを分ける。
+SQLテスト5系統は専用の新しいPostgreSQLクラスター上で実行する。ReaderテストはPostgreSQL 17コンテナを自動起動する。AI quotaテストはクラスター全体にロールを作るため、他のSQLテストともクラスターを分ける。
 
 ```sh
 AI_QUOTA_TEST_ALLOW_DISPOSABLE_DB=YES \
@@ -30,9 +30,11 @@ PRICE_MEMO_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/price_memo_dat
 PRICE_MEMO_BROADCAST_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/price_memo_private_broadcast_test \
   npm run test:sql:private-broadcast
 npm run test:sql:migration-reader
+DB_CONTRACT_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/db_contract_test \
+  npm run test:sql:contract
 ```
 
-URLはloopbackに限定され、テストごとの専用データベース名を要求する。テスト用URLをシェル履歴やログに残さないこと。
+SQLテスト接続先はloopbackに限定され、テストごとの専用データベース名を要求する。AI quotaテストはfresh clusterを使う。テスト用URLをシェル履歴やログに残さないこと。
 
 ## Dev/Prodのmigration履歴照合
 
@@ -64,6 +66,17 @@ DevとProdは個別に照合し、両方の結果をレビューする。migrati
 workflowはSession Poolerのhost形式と、Reader専用username、port `5432`、database `postgres`、SSL `require`、secretの存在を接続前に確認する。Supabaseの共有Session Poolerはport `5432`を使い、custom roleのusernameは`<role>.<project-ref>`形式。[Supabase接続ドキュメント](https://supabase.com/docs/guides/database/connecting-to-postgres)
 
 Environment未設定、変数・secret欠落、main以外からのdispatch、最新main SHAとの不一致ではDB接続前に停止する。Writer用SecretやGitHub Settingsの変更はこのworkflowに含めない。
+
+## アプリDB互換性契約
+
+契約形式v1、カタログ検証器、静的検査と実動作検査の境界、契約SHA固定案は[DB互換性契約の設計](docs/db-compatibility-contracts.md)を参照。検証器は契約ファイルを厳密に検証し、PostgreSQLカタログのみをread-only transactionで照合する。`scripts/fixtures/db-contract-v1.example.json`は形式・テスト専用で、receipt-managerまたはprice-memoの実契約ではない。
+
+```sh
+python3 scripts/check-db-contract.py scripts/fixtures/db-contract-v1.example.json --validate-only
+python3 scripts/check-db-contract.py path/to/consumer-owned-contract.json
+```
+
+2つ目のコマンドは呼び出し元の`PG*`接続環境を使う。契約の検査に業務テーブル行のSELECTは不要。成功表示はカタログ上の静的検査のみを意味し、RLS実動作・Authユーザー間分離・RPC結果・Realtime配信を保証しない。
 
 ## Migrationの不変性
 
