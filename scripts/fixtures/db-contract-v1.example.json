@@ -1,0 +1,103 @@
+{
+  "format_version": 1,
+  "app_id": "contract-fixture",
+  "contract_version": "1.0.0",
+  "capabilities": {
+    "tables": [
+      {
+        "schema": "public",
+        "name": "fixture_items",
+        "columns": [
+          { "name": "id", "type": "uuid", "nullable": false },
+          { "name": "user_id", "type": "uuid", "nullable": false },
+          { "name": "label", "type": "text", "nullable": false },
+          { "name": "optional_note", "type": "text", "nullable": true }
+        ],
+        "constraints": [
+          { "kind": "primary_key", "columns": ["id"] },
+          { "kind": "unique", "columns": ["user_id", "label"] },
+          {
+            "kind": "foreign_key",
+            "columns": ["user_id"],
+            "references": { "table": "auth.users", "columns": ["id"] },
+            "on_delete": "cascade"
+          }
+        ],
+        "rls": {
+          "enabled": true,
+          "forced": false,
+          "policies": [
+            { "name": "fixture_items_owner_all", "command": "ALL", "roles": ["authenticated"] }
+          ]
+        },
+        "privileges": [
+          { "role": "authenticated", "allow": ["SELECT", "INSERT", "UPDATE", "DELETE"], "deny": ["TRUNCATE"] },
+          { "role": "anon", "allow": [], "deny": ["SELECT", "INSERT", "UPDATE", "DELETE"] }
+        ]
+      },
+      {
+        "schema": "public",
+        "name": "relation_probe",
+        "columns": [{ "name": "id", "type": "uuid", "nullable": true }]
+      }
+    ],
+    "functions": [
+      {
+        "signature": "public.fixture_lookup(uuid)",
+        "returns": "text",
+        "returns_set": false,
+        "arguments": [{ "name": "p_user_id", "mode": "IN", "type": "uuid" }],
+        "security": "invoker",
+        "search_path": "",
+        "execute": { "allow": ["authenticated"], "deny": ["public", "anon"] }
+      },
+      {
+        "signature": "public.fixture_mode(uuid)",
+        "returns": "uuid",
+        "arguments": [{ "name": "p_user_id", "mode": "IN", "type": "uuid" }],
+        "security": "invoker",
+        "execute": { "allow": ["authenticated"], "deny": ["public", "anon"] }
+      },
+      {
+        "signature": "public.fixture_unnamed(uuid)",
+        "returns": "uuid",
+        "arguments": [{ "name": null, "mode": "IN", "type": "uuid" }],
+        "security": "invoker",
+        "execute": { "allow": ["authenticated"], "deny": ["public", "anon"] }
+      },
+      {
+        "signature": "public.fixture_rows()",
+        "returns": "uuid",
+        "returns_set": true,
+        "arguments": [{ "name": "row_id", "mode": "TABLE", "type": "uuid" }],
+        "security": "invoker",
+        "execute": { "allow": ["authenticated"], "deny": ["public", "anon"] }
+      },
+      {
+        "signature": "public.fixture_procedure_probe()",
+        "returns": "void",
+        "arguments": [],
+        "security": "invoker",
+        "search_path": "",
+        "execute": { "allow": ["authenticated"], "deny": ["public", "anon"] }
+      }
+    ],
+    "auth": {
+      "foreign_keys": [
+        {
+          "table": "public.fixture_items",
+          "columns": ["user_id"],
+          "references": "auth.users",
+          "referenced_columns": ["id"],
+          "on_delete": "cascade"
+        }
+      ],
+      "functions": ["auth.uid()"]
+    },
+    "realtime": {
+      "relations": [{ "schema": "realtime", "name": "messages", "rls_enabled": true }],
+      "functions": ["realtime.topic()"],
+      "triggers": [{ "table": "public.fixture_items", "name": "fixture_items_broadcast", "enabled": "enabled" }]
+    }
+  }
+}
