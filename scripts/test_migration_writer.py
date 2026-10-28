@@ -356,6 +356,11 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertIn("DEV_MIGRATION_SUPABASE_DB_PASSWORD", reusable)
         self.assertIn("Verify current pinned app contracts before apply", reusable)
         self.assertIn("Verify current pinned app contracts after apply", reusable)
+        self.assertIn("(inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST)", reusable)
+        self.assertIn("(inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST)", reusable)
+        self.assertIn("|| ''", reusable)
+        self.assertNotIn("|| vars.PROD_SUPABASE_POOLER_HOST", reusable)
+        self.assertNotIn("|| secrets.MIGRATION_READER_PASSWORD", reusable)
         self.assertNotIn("supabase db push", reusable)
 
 

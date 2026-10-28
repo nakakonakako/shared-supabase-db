@@ -61,14 +61,14 @@ jobs:
     env:
       DB_TARGET: ${{ inputs.target }}
       DB_ENVIRONMENT: ${{ inputs.target == 'dev' && 'development-db-check' || 'production-db-check' }}
-      DB_POOLER_HOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
-      DB_PROJECT_REF: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
+      DB_POOLER_HOST: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST) || (inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST) || '' }}
+      DB_PROJECT_REF: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF) || (inputs.target == 'production' && vars.PROD_SUPABASE_PROJECT_REF) || '' }}
       DB_CONNECTION_ROLE: reader
-      PGHOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
+      PGHOST: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST) || (inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST) || '' }}
       PGPORT: "5432"
       PGDATABASE: postgres
-      PGUSER: migration_preflight_login.${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
-      PGPASSWORD: ${{ inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD || secrets.MIGRATION_READER_PASSWORD }}
+      PGUSER: migration_preflight_login.${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF) || (inputs.target == 'production' && vars.PROD_SUPABASE_PROJECT_REF) || '' }}
+      PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_READER_PASSWORD) || '' }}
       PGSSLMODE: require
       PGCONNECT_TIMEOUT: "10"
     steps:
@@ -155,14 +155,14 @@ jobs:
     env:
       DB_TARGET: ${{ inputs.target }}
       DB_ENVIRONMENT: ${{ inputs.target == 'dev' && 'development-db-apply' || 'production-db-apply' }}
-      DB_POOLER_HOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
-      DB_PROJECT_REF: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
+      DB_POOLER_HOST: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST) || (inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST) || '' }}
+      DB_PROJECT_REF: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF) || (inputs.target == 'production' && vars.PROD_SUPABASE_PROJECT_REF) || '' }}
       DB_CONNECTION_ROLE: writer
-      PGHOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
+      PGHOST: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST) || (inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST) || '' }}
       PGPORT: "5432"
       PGDATABASE: postgres
-      PGUSER: postgres.${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
-      PGPASSWORD: ${{ inputs.target == 'dev' && secrets.DEV_MIGRATION_SUPABASE_DB_PASSWORD || secrets.MIGRATION_SUPABASE_DB_PASSWORD }}
+      PGUSER: postgres.${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF) || (inputs.target == 'production' && vars.PROD_SUPABASE_PROJECT_REF) || '' }}
+      PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_SUPABASE_DB_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_SUPABASE_DB_PASSWORD) || '' }}
       PGSSLMODE: require
       PGCONNECT_TIMEOUT: "10"
     steps:
@@ -216,14 +216,14 @@ jobs:
     env:
       DB_TARGET: ${{ inputs.target }}
       DB_ENVIRONMENT: ${{ inputs.target == 'dev' && 'development-db-check' || 'production-db-check' }}
-      DB_POOLER_HOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
-      DB_PROJECT_REF: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
+      DB_POOLER_HOST: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST) || (inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST) || '' }}
+      DB_PROJECT_REF: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF) || (inputs.target == 'production' && vars.PROD_SUPABASE_PROJECT_REF) || '' }}
       DB_CONNECTION_ROLE: reader
-      PGHOST: ${{ inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST || vars.PROD_SUPABASE_POOLER_HOST }}
+      PGHOST: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST) || (inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST) || '' }}
       PGPORT: "5432"
       PGDATABASE: postgres
-      PGUSER: migration_preflight_login.${{ inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF || vars.PROD_SUPABASE_PROJECT_REF }}
-      PGPASSWORD: ${{ inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD || secrets.MIGRATION_READER_PASSWORD }}
+      PGUSER: migration_preflight_login.${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF) || (inputs.target == 'production' && vars.PROD_SUPABASE_PROJECT_REF) || '' }}
+      PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_READER_PASSWORD) || '' }}
       PGSSLMODE: require
       PGCONNECT_TIMEOUT: "10"
     steps:
