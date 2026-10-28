@@ -1,0 +1,60 @@
+# shared DB migration Writer workflow
+
+## この実装段階の範囲
+
+`apply-dev-db-migrations.yml` と `apply-production-db-migrations.yml` は、mainからの手動実行だけを受け付ける。両方とも同じ再利用workflowを呼び出すが、呼び出し側でtargetを固定し、Reader Environment、Writer Environment、接続先変数、資格情報を分離する。PR CIからhosted DBへの接続はない。
+
+DB接続前に、Environmentのproject refをworkflowコード内のDev/Prod固定project refと照合する。Environment変数同士の検証だけでは、Dev EnvironmentへProdの接続先一式を誤登録した場合を検出できないため、この独立pinで拒否する。Dev/Prodで共有するpooler hostnameは接続先識別子として扱わない。固定refの変更はプロジェクト切替を伴う明示的なコードレビュー対象とする。この事前検査はEnvironment設定ミスを防ぐが、接続後のSupabase側project identityを別制御面から証明するものではない。切替段階では接続後のidentity照合も必須とし、資格情報登録前にDev/Prodそれぞれの期待値を確認する。
+
+この段階はWriter workflow基盤と隔離テストだけを追加する。GitHub EnvironmentやSecretを作成・変更せず、hosted DBへ接続せず、migrationも適用しない。workflowに参照されるEnvironmentが未作成または保護不足なら、Reader事前検証の後、GitHub APIの読み取り専用保護確認で停止する。未設定のEnvironmentをGitHubが暗黙に作成して適用jobへ進むことを避ける。
+
+Writer Environmentはworkflowのmain制限に加えて、GitHub側で事前に作成し、`main`だけのdeployment branch policyとadministrator bypass無効を設定する。Devでは `development-db-apply` に `DEV_SUPABASE_POOLER_HOST`、`DEV_SUPABASE_PROJECT_REF`、`DEV_MIGRATION_SUPABASE_DB_PASSWORD` を設定する。Prodでは `production-db-apply` に `PROD_SUPABASE_POOLER_HOST`、`PROD_SUPABASE_PROJECT_REF`、`MIGRATION_SUPABASE_DB_PASSWORD` を設定する。値の登録は別途承認された切り替え作業で行い、このPRでは登録しない。
+
+Prod EnvironmentにはRequired reviewersが最低1名必要。独立承認者を用意できない場合は、同一運用者をreviewerにした手動承認を設定できるが、これは独立した職務分離ではなく、実行を止めて確認した記録を残すゲートに限られる。可能なら別の管理者・運用者をreviewerにし、Prevent self-reviewとadministrator bypass無効を設定する。独立承認者がいない間に使える追加保護は、main限定、手動dispatch、main SHA再確認、migration不変性/checksum確認、Writer SecretのEnvironment限定、Reader事前/事後検証、同一shared repo内の直列化である。これらは独立承認の代替ではない。
+
+Environment保護検査はdeployment branch policyの総数と全要素、`main`という名前、`branch`種別を確認する。API応答の欠落・不整合や未知のprotection ruleはfail-closedとする。
+
+## 適用判定
+
+適用workflowはsharedの `supabase/migrations/` と `SHA256SUMS` を履歴の唯一の基準として扱う。migration一覧の健全性とアプリ契約は別々に判定する。
+
+| 状態 | 判定 | Writer処理 |
+| --- | --- | --- |
+| `IN_SYNC` | DB履歴がsharedの全versionと一致 | Writer Environmentを要求せず、CLIを呼ばず、no-op後にReader postflight |
+| `PENDING` | remote履歴がshared履歴の連続したprefixで、未適用versionだけが残る | 通常の適用対象。Writer Environment保護を確認し、承認後に再照合して適用 |
+| `REMOTE_ONLY` | DBにsharedにないversionがある | 停止。自動修復・履歴の削除・適用をしない |
+| `ERROR` | 接続/問い合わせ失敗、形式不正、local/remote履歴の分岐、checksum/不変性違反 | 停止。適用しない |
+
+localに未適用versionがあってもremoteに後続versionがあるケースは、単純な `PENDING` としない。履歴の順序がsharedの連続prefixでなければ `ERROR` とする。Writer approval後にもmain SHA、migration不変性、履歴状態を再検査する。別workflow/repositoryのGitHub concurrencyが排他になるとは仮定しない。ProdのWriterを有効化する前に、receipt-managerの旧apply jobをmainから除去して旧Secret参照を不能にする。
+
+適用には固定したSupabase CLIを使い、`supabase db push --yes --skip-vault` だけを呼ぶ。Vault secret同期、roles、seedのオプションを含めない。DB URLはrunnerの環境ファイルへpercent-encodeして渡し、URLやpasswordをログへ出さない。CLI出力は破棄し、失敗時は機密情報を含まない一般エラーを表示する。適用後はReaderによるhistory、Reader権限、契約、およびProdのintegrity検証がすべて成功しない限りworkflowを成功扱いしない。
+
+## 契約とexpand/contract
+
+適用前後の契約検証は、そのworkflow SHAに固定された `consumer_db_contracts.py` の両revisionを使う。同一workflowの途中で契約revisionを変えない。migrationの前後で現在稼働中の両アプリが引き続き動作できることを確認するための検証であり、migration履歴の `IN_SYNC` 判定とは別である。契約の形式検証はDB接続前に行う。
+
+新しいアプリ契約がmigration前提のschemaを要求する場合、その契約SHAを先に更新してはならない。次の順で段階化する。
+
+1. 現行両アプリの契約が通る後方互換なexpand migrationを追加し、shared Writerで適用
+2. 新しい契約SHAをsharedへ固定し、Dev/Prod Readerで候補契約を検証
+3. 両アプリのdeploy前Reader gateで同じ候補契約とshared migration履歴を検証してからアプリを配信
+4. 全consumerが新しいschemaを使い、古いschemaに依存する実行中アプリがないことを確認後、contract migrationを別に適用
+
+contract migration前には、現行アプリ契約が削除対象のschemaを要求していないことが必要。契約検証が不一致なら適用や配信を進めず、契約更新または互換schemaへのforward migrationをレビューする。
+
+## Writer移管の次段階
+
+1. **receipt-manager PR:** `check-production-db-state.py` のmigration一覧をsharedの固定revisionから取得する形へ変更する。receipt-manager独自migration一覧はDB全体履歴の正本に使わない。Readerによるmigration履歴健全性判定とreceipt-manager自身のDB契約判定を別の結果として保つ。receipt-manager `deploy.yml` のWriter `apply` jobとWriter Secret参照を除去し、`IN_SYNC` とReader契約検証を満たさない限りdeployを止める。
+2. **price-memo PR:** deployのbuild/deploy前に、固定SHAのshared検証コードを取得して実行するReader gateを追加する。DB履歴はshared migration inventoryと照合し、price-memo固有の互換性はprice-memo契約と照合する。両者のPASSを独立して要求する。price-memoに必要なのはReader Environment/SecretだけでWriter資格情報ではない。
+3. **Dev cutover:** shared `development-db-apply` を保護設定してから専用Secretを登録する。Devで旧receipt-managerのローカルWriter経路を使えない状態を確認してshared workflowから適用し、Reader postflightと両アプリ検証を通す。
+4. **Prod cutover:** receipt-managerの旧apply workflowがmainから除かれ、旧Writer参照が実行不能なことを確認後に限り、shared `production-db-apply` を保護してSecretを登録する。初回はReader preflight、明示承認、Writer再照合、適用、Reader postflightの全記録を確認する。
+
+旧Writer Secretの削除とDB password rotationは別作業にする。旧workflowの無効化後も、旧SecretはsharedのWriter経路が成功するまで復旧用として保持できるが、旧workflowを再有効化する前にはshared Secretを無効化し、同時に適用可能な経路を作らない。shared workflowからの実適用とアプリ配信成功後に旧Secret参照がないことを棚卸しして削除する。DB password rotationは、shared側の新Secret登録・接続確認とDB側のcredential変更を管理者が同期して行える保守枠で別途実施し、失敗時の管理者break-glass経路を事前確認する。
+
+## 失敗時
+
+- Readerの接続、権限、履歴、契約検証が失敗した場合はWriterへ進まない。Reader権限を増やして通さない。
+- Writer再照合が `IN_SYNC` になった場合は安全なno-op。`REMOTE_ONLY`、`ERROR`、非連続pendingは適用しない。
+- CLI失敗後はmigrationを再実行せず、まずReaderでmigration履歴・catalog・両契約を確認する。適用済みmigrationは編集せず、修復はforward migrationとして扱う。
+- CLIが失敗した場合もReader postflightを試み、部分適用や履歴状態をread-onlyで確認する。workflow自体はapply jobの失敗により成功扱いにならない。
+- postflight失敗時はアプリdeployを止め、schemaを自動rollbackしない。Reader診断と運用者確認後、承認済みのforward repairまたはアプリ互換版で復旧する。

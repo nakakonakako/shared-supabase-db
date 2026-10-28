@@ -117,10 +117,11 @@ class ProductionDbCheckTests(unittest.TestCase):
         self.assertNotIn("08006", integrity.stdout + integrity.stderr)
 
     def test_history_mismatch_is_rejected(self) -> None:
-        result = self.run_history(remote="19990101000000\n")
+        local = sorted(path.name[:14] for path in (ROOT / "supabase/migrations").glob("*.sql"))
+        result = self.run_history(remote="\n".join([*local, "19990101000000"]) + "\n")
         self.assertEqual(result.returncode, 1)
         self.assertIn("REMOTE_ONLY: 19990101000000", result.stderr)
-        self.assertIn("PENDING:", result.stderr)
+        self.assertNotIn("PENDING:", result.stderr)
 
     def test_reader_and_bootstrap_permission_anomalies_are_mismatches(self) -> None:
         for diagnostic in DIAGNOSTICS[:2]:
