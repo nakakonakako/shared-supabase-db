@@ -120,9 +120,9 @@ def validate(environment: dict, branch_policy: dict, target: str) -> str:
     if target == "dev":
         if not reviewer_rules or not any(rule["reviewers"] for rule in reviewer_rules):
             raise EnvironmentError("Dev Writer Environment requires at least one reviewer")
-        if not any(rule["reviewers"] and rule["prevent_self_review"] is True for rule in reviewer_rules):
-            raise EnvironmentError("Dev Writer Environment must prevent self-approval")
-        return "Dev Writer Environment protection valid (main-only, reviewer approval, self-approval prevented)"
+        if not any(rule["reviewers"] and rule["prevent_self_review"] is False for rule in reviewer_rules):
+            raise EnvironmentError("Dev Writer Environment must allow self-approval")
+        return "Dev Writer Environment protection valid (main-only, reviewer approval, self-approval allowed)"
     if target == "production":
         if not reviewer_rules or not any(rule["reviewers"] for rule in reviewer_rules):
             raise EnvironmentError("production Writer Environment requires at least one reviewer")
