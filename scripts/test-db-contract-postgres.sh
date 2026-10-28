@@ -36,12 +36,22 @@ if [[ "$database_name" != "db_contract_test" ]]; then
   echo "Refusing DB contract SQL test: database must be named db_contract_test." >&2
   exit 1
 fi
+output="$(mktemp "${TMPDIR:-/tmp}/db-contract-mismatch.XXXXXX")"
+not_valid_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-not-valid.XXXXXX")"
+advanced_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-advanced.XXXXXX")"
+public_acl_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-public-acl.XXXXXX")"
+function_acl_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-function-acl.XXXXXX")"
+contracts_dir="$(mktemp -d "${TMPDIR:-/tmp}/db-contract-pinned-fixtures.XXXXXX")"
+trap 'rm -rf -- "$contracts_dir"; rm -f -- "$output" "$not_valid_contract" "$advanced_contract" "$public_acl_contract" "$function_acl_contract"' EXIT INT TERM
 
 fresh="$(psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -Atqc "
   SELECT pg_catalog.to_regnamespace('auth') IS NULL
     AND pg_catalog.to_regnamespace('realtime') IS NULL
+    AND pg_catalog.to_regnamespace('ai_quota') IS NULL
     AND pg_catalog.to_regclass('public.fixture_items') IS NULL
-    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname IN ('anon','authenticated'))
+    AND pg_catalog.to_regclass('public.acl_probe_table') IS NULL
+    AND pg_catalog.to_regprocedure('public.acl_probe_function()') IS NULL
+    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname IN ('anon','authenticated','migration_preflight_reader','contract_reader_login'))
 ")"
 if [[ "$fresh" != "t" ]]; then
   echo "Refusing DB contract SQL test: database/cluster is not fresh and disposable." >&2
@@ -51,6 +61,10 @@ fi
 psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 <<'SQL'
 CREATE ROLE anon NOLOGIN;
 CREATE ROLE authenticated NOLOGIN;
+CREATE ROLE migration_preflight_reader NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
+CREATE ROLE contract_reader_login LOGIN PASSWORD 'disposable-contract-reader-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT;
+GRANT migration_preflight_reader TO contract_reader_login WITH INHERIT TRUE, SET FALSE;
+ALTER ROLE contract_reader_login SET default_transaction_read_only = on;
 CREATE SCHEMA auth;
 CREATE TABLE auth.users (id uuid PRIMARY KEY);
 CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $$ SELECT NULL::uuid $$;
@@ -58,6 +72,10 @@ CREATE SCHEMA realtime;
 CREATE TABLE realtime.messages (id bigint);
 ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;
 CREATE FUNCTION realtime.topic() RETURNS text LANGUAGE sql STABLE AS $$ SELECT NULL::text $$;
+CREATE SCHEMA ai_quota;
+CREATE TABLE ai_quota.settings (id smallint PRIMARY KEY, configuration_value text NOT NULL);
+GRANT USAGE ON SCHEMA ai_quota TO migration_preflight_reader;
+GRANT SELECT (id) ON TABLE ai_quota.settings TO migration_preflight_reader;
 CREATE TABLE public.fixture_items (
   id uuid PRIMARY KEY,
   user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -66,6 +84,7 @@ CREATE TABLE public.fixture_items (
   UNIQUE (user_id, label)
 );
 CREATE TABLE public.relation_probe (id uuid);
+CREATE TABLE public.acl_probe_table (id integer NOT NULL);
 ALTER TABLE public.fixture_items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY fixture_items_owner_all ON public.fixture_items
   FOR ALL TO authenticated USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
@@ -88,6 +107,9 @@ RETURNS text LANGUAGE sql SECURITY INVOKER SET search_path = ''
 AS $$ SELECT $1::text $$;
 REVOKE ALL ON FUNCTION public.fixture_lookup(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.fixture_lookup(uuid) TO authenticated;
+CREATE FUNCTION public.acl_probe_function()
+RETURNS integer LANGUAGE sql SECURITY INVOKER AS $$ SELECT 1 $$;
+GRANT EXECUTE ON FUNCTION public.acl_probe_function() TO authenticated;
 CREATE FUNCTION public.fixture_mode(IN p_user_id uuid)
 RETURNS uuid LANGUAGE sql SECURITY INVOKER AS $$ SELECT $1 $$;
 REVOKE ALL ON FUNCTION public.fixture_mode(uuid) FROM PUBLIC;
@@ -111,17 +133,105 @@ CREATE TRIGGER fixture_items_broadcast BEFORE INSERT ON public.fixture_items
   FOR EACH ROW EXECUTE FUNCTION public.fixture_items_broadcast_trigger();
 SQL
 
+export PGUSER=contract_reader_login PGPASSWORD=disposable-contract-reader-password
+[[ "$(psql -X -w -A -t -v ON_ERROR_STOP=1 -c 'SHOW default_transaction_read_only')" == 'on' ]] || {
+  echo "Disposable contract Reader is not default read-only." >&2
+  exit 1
+}
+if psql -X -w -v ON_ERROR_STOP=1 -c 'SELECT * FROM public.fixture_items' >"$output" 2>&1; then
+  echo "Contract Reader unexpectedly read application rows." >&2
+  exit 1
+fi
+grep -Fq 'permission denied' "$output" || {
+  echo "Contract Reader application SELECT failed for an unexpected reason." >&2
+  exit 1
+}
+if psql -X -w -v ON_ERROR_STOP=1 -c "INSERT INTO public.fixture_items (id,user_id,label) VALUES (gen_random_uuid(),gen_random_uuid(),'blocked')" >"$output" 2>&1; then
+  echo "Contract Reader unexpectedly wrote application rows." >&2
+  exit 1
+fi
+grep -Eiq 'permission denied|read-only transaction' "$output" || {
+  echo "Contract Reader application INSERT was not rejected by privileges or read-only mode." >&2
+  exit 1
+}
+[[ "$(psql -X -w -A -t -v ON_ERROR_STOP=1 -c "SELECT pg_catalog.has_table_privilege(current_user, 'public.fixture_items', 'SELECT') OR pg_catalog.has_table_privilege(current_user, 'public.fixture_items', 'INSERT')")" == 'f' ]] || {
+  echo "Contract Reader has application-table SELECT or INSERT privilege." >&2
+  exit 1
+}
 python3 scripts/check-db-contract.py scripts/fixtures/db-contract-v1.example.json
+python3 - "$contracts_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source = json.loads(Path("scripts/fixtures/db-contract-v1.example.json").read_text(encoding="utf-8"))
+for app_id in ("price-memo", "receipt-manager"):
+    contract = {**source, "app_id": app_id}
+    Path(sys.argv[1], f"{app_id}.json").write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/verify-consumer-db-contracts.py --contracts-dir "$contracts_dir" >"$output" 2>&1 || {
+  cat "$output" >&2
+  echo "Two-contract aggregation failed for matching disposable fixtures." >&2
+  exit 1
+}
+grep -Fq 'price-memo: STATIC PASS' "$output"
+grep -Fq 'receipt-manager: STATIC PASS' "$output"
+grep -Fq 'aggregate: STATIC PASS (2 contracts)' "$output"
+echo "PASS: two pinned contract results aggregate to STATIC PASS"
+python3 - "$contracts_dir/receipt-manager.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["tables"][0]["columns"][0]["type"] = "text"
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+if python3 scripts/verify-consumer-db-contracts.py --contracts-dir "$contracts_dir" >"$output" 2>&1; then
+  echo "Two-contract aggregation incorrectly accepted a mismatching contract." >&2
+  exit 1
+fi
+grep -Fq 'receipt-manager: CONTRACT MISMATCH' "$output"
+grep -Fq 'price-memo: STATIC PASS' "$output"
+grep -Fq 'aggregate: FAIL' "$output"
+echo "PASS: one contract mismatch fails the aggregate while preserving per-contract results"
+python3 - "$contracts_dir/receipt-manager.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["tables"][0]["name"] = "missing_fixture_items"
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+if python3 scripts/verify-consumer-db-contracts.py --contracts-dir "$contracts_dir" >"$output" 2>&1; then
+  echo "Two-contract aggregation incorrectly accepted a missing relation." >&2
+  exit 1
+fi
+grep -Fq 'receipt-manager: CONTRACT MISMATCH' "$output"
+if grep -Fq 'EXECUTION ERROR' "$output"; then
+  echo "Missing relation was misclassified as an execution error." >&2
+  exit 1
+fi
+echo "PASS: missing relations are classified as contract mismatches"
+if PGPORT=1 PGCONNECT_TIMEOUT=1 python3 scripts/verify-consumer-db-contracts.py --contracts-dir "$contracts_dir" >"$output" 2>&1; then
+  echo "Two-contract aggregation incorrectly accepted a connection failure." >&2
+  exit 1
+fi
+grep -Fq 'EXECUTION ERROR' "$output"
+grep -Fq 'aggregate: FAIL' "$output"
+if grep -Eqi 'password|postgresql://|postgres://' "$output"; then
+  echo "Contract verification output leaked connection data." >&2
+  exit 1
+fi
+echo "PASS: connection failure is fail-closed and sanitized"
 psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 <<'SQL'
 ALTER TABLE public.fixture_items ADD COLUMN future_optional text;
 CREATE TABLE public.unrelated_additive_table (id uuid PRIMARY KEY);
 SQL
 python3 scripts/check-db-contract.py scripts/fixtures/db-contract-v1.example.json
-output="$(mktemp "${TMPDIR:-/tmp}/db-contract-mismatch.XXXXXX")"
-not_valid_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-not-valid.XXXXXX")"
-advanced_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-advanced.XXXXXX")"
-trap 'rm -f -- "$output" "$not_valid_contract" "$advanced_contract"' EXIT INT TERM
-
 expect_failure() {
   local assertion="$1" contract_file="${2:-scripts/fixtures/db-contract-v1.example.json}"
   if python3 scripts/check-db-contract.py "$contract_file" >"$output" 2>&1; then
@@ -134,6 +244,151 @@ expect_failure() {
   fi
   echo "PASS: rejected $assertion"
 }
+
+python3 - "$public_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+contract = {
+    "format_version": 1,
+    "app_id": "public-acl-probe",
+    "contract_version": "1.0.0",
+    "capabilities": {
+        "tables": [{
+            "schema": "public", "name": "acl_probe_table",
+            "columns": [{"name": "id", "type": "integer", "nullable": False}],
+            "privileges": [{"role": "public", "allow": [], "deny": ["SELECT"]}],
+        }],
+        "functions": [],
+    },
+}
+Path(sys.argv[1]).write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$public_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'GRANT SELECT ON public.acl_probe_table TO PUBLIC' >/dev/null
+expect_failure 'table public.acl_probe_table public SELECT denied' "$public_acl_contract"
+python3 - "$public_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+privilege = contract["capabilities"]["tables"][0]["privileges"][0]
+privilege["allow"], privilege["deny"] = ["SELECT"], []
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$public_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE SELECT ON public.acl_probe_table FROM PUBLIC' >/dev/null
+expect_failure 'table public.acl_probe_table public SELECT allowed' "$public_acl_contract"
+python3 - "$public_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+privilege = contract["capabilities"]["tables"][0]["privileges"][0]
+privilege["allow"], privilege["deny"] = [], ["SELECT"]
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$public_acl_contract"
+python3 - "$public_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["tables"][0]["privileges"][0] = {
+    "role": "contract_missing_role", "allow": [], "deny": ["SELECT"]
+}
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'table public.acl_probe_table contract_missing_role SELECT denied' "$public_acl_contract"
+echo "PASS: table ACL checks handle PUBLIC and missing roles"
+
+python3 - "$function_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+contract = {
+    "format_version": 1,
+    "app_id": "function-acl-probe",
+    "contract_version": "1.0.0",
+    "capabilities": {
+        "tables": [],
+        "functions": [{
+            "signature": "public.acl_probe_function()", "returns": "integer",
+            "security": "invoker",
+            "execute": {"allow": ["authenticated"], "deny": ["public"]},
+        }],
+    },
+}
+Path(sys.argv[1]).write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'function public.acl_probe_function() EXECUTE denied for public' "$function_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE EXECUTE ON FUNCTION public.acl_probe_function() FROM PUBLIC' >/dev/null
+python3 scripts/check-db-contract.py "$function_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'GRANT EXECUTE ON FUNCTION public.acl_probe_function() TO PUBLIC' >/dev/null
+expect_failure 'function public.acl_probe_function() EXECUTE denied for public' "$function_acl_contract"
+python3 - "$function_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["functions"][0]["execute"] = {"allow": ["authenticated", "public"], "deny": []}
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+python3 scripts/check-db-contract.py "$function_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE EXECUTE ON FUNCTION public.acl_probe_function() FROM PUBLIC' >/dev/null
+expect_failure 'function public.acl_probe_function() EXECUTE for public' "$function_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'GRANT EXECUTE ON FUNCTION public.acl_probe_function() TO PUBLIC' >/dev/null
+python3 - "$function_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["functions"][0]["execute"]["deny"] = ["contract_missing_role"]
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+expect_failure 'function public.acl_probe_function() EXECUTE denied for contract_missing_role' "$function_acl_contract"
+python3 - "$function_acl_contract" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["functions"][0]["execute"] = {"allow": ["authenticated"], "deny": []}
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE EXECUTE ON FUNCTION public.acl_probe_function() FROM PUBLIC' >/dev/null
+python3 scripts/check-db-contract.py "$function_acl_contract"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE EXECUTE ON FUNCTION public.acl_probe_function() FROM authenticated' >/dev/null
+if python3 scripts/check-db-contract.py "$function_acl_contract" >"$output" 2>&1; then
+  echo "Missing authenticated EXECUTE privilege was accepted." >&2
+  exit 1
+fi
+grep -Fq 'function public.acl_probe_function() EXECUTE for authenticated' "$output"
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'GRANT EXECUTE ON FUNCTION public.acl_probe_function() TO authenticated' >/dev/null
+python3 scripts/check-db-contract.py "$function_acl_contract"
+echo "PASS: function EXECUTE ACL checks handle PUBLIC, real roles, and missing roles"
 
 python3 - "$advanced_contract" <<'PY'
 import json
@@ -394,6 +649,23 @@ DROP TABLE public.relation_probe;
 CREATE VIEW public.relation_probe AS SELECT NULL::uuid AS id;
 SQL
 expect_failure 'relation public.relation_probe kind=table'
+
+psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 \
+  -c 'REVOKE SELECT ON pg_catalog.pg_class FROM PUBLIC' >/dev/null
+set +e
+python3 scripts/verify-consumer-db-contracts.py --contracts-dir "$contracts_dir" >"$output" 2>&1
+catalog_permission_status=$?
+set -e
+if [[ "$catalog_permission_status" -ne 2 ]] || ! grep -Fq 'EXECUTION ERROR' "$output"; then
+  echo "Insufficient catalog access was not reported as an execution error." >&2
+  cat "$output" >&2
+  exit 1
+fi
+if grep -Eqi 'password|postgresql://|postgres://' "$output"; then
+  echo "Catalog permission failure leaked connection data." >&2
+  exit 1
+fi
+echo "PASS: insufficient catalog access is an execution error and remains sanitized"
 
 rm -f -- "$output" "$not_valid_contract"
 echo "PASS: PostgreSQL catalog compatibility regression tests"

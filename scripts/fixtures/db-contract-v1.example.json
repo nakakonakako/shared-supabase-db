@@ -39,6 +39,11 @@
         "schema": "public",
         "name": "relation_probe",
         "columns": [{ "name": "id", "type": "uuid", "nullable": true }]
+      },
+      {
+        "schema": "ai_quota",
+        "name": "settings",
+        "columns": [{ "name": "id", "type": "smallint", "nullable": false }]
       }
     ],
     "functions": [

@@ -41,6 +41,10 @@ class DbContractTests(unittest.TestCase):
         self.assertTrue(any("Auth FK" in label for label in labels))
         self.assertTrue(any("Realtime relation" in label for label in labels))
         self.assertTrue(any("Realtime trigger" in label for label in labels))
+        query_text = "\n".join(query for _, query in checks)
+        self.assertIn("pg_catalog.pg_namespace", query_text)
+        self.assertNotIn("to_regclass", query_text)
+        self.assertNotIn("to_regprocedure", query_text)
 
     def test_invalid_shape_and_unsupported_fields_fail_closed(self) -> None:
         invalids = []
@@ -126,8 +130,44 @@ class DbContractTests(unittest.TestCase):
         privilege["deny"].append("TRIGGER")
         checks = build_checks(validate_contract(contract))
         sql = dict(checks)
-        self.assertIn("pg_catalog.has_table_privilege('authenticated','public.fixture_items','MAINTAIN') IS TRUE", sql["table public.fixture_items authenticated MAINTAIN allowed"])
-        self.assertIn("pg_catalog.has_table_privilege('authenticated','public.fixture_items','TRIGGER') IS FALSE", sql["table public.fixture_items authenticated TRIGGER denied"])
+        self.assertIn("JOIN pg_catalog.pg_roles r ON r.rolname='authenticated'", sql["table public.fixture_items authenticated MAINTAIN allowed"])
+        self.assertIn("pg_catalog.has_table_privilege(r.oid,c.oid,'MAINTAIN')", sql["table public.fixture_items authenticated MAINTAIN allowed"])
+        self.assertIn("pg_catalog.has_table_privilege(r.oid,c.oid,'TRIGGER')", sql["table public.fixture_items authenticated TRIGGER denied"])
+        self.assertIn("NOT (EXISTS", sql["table public.fixture_items authenticated TRIGGER denied"])
+        self.assertIn("IS TRUE", sql["table public.fixture_items authenticated TRIGGER denied"])
+
+    def test_table_privilege_checks_distinguish_public_and_missing_roles(self) -> None:
+        contract = copy.deepcopy(self.valid)
+        privileges = contract["capabilities"]["tables"][0]["privileges"]
+        privileges.extend([
+            {"role": "public", "allow": ["SELECT"], "deny": ["INSERT"]},
+            {"role": "contract_missing_role", "allow": [], "deny": ["SELECT"]},
+        ])
+        sql = dict(build_checks(validate_contract(contract)))
+        public_allow = sql["table public.fixture_items public SELECT allowed"]
+        public_deny = sql["table public.fixture_items public INSERT denied"]
+        missing_role_deny = sql["table public.fixture_items contract_missing_role SELECT denied"]
+        self.assertIn("acl.grantee=0", public_allow)
+        self.assertIn("pg_catalog.aclexplode", public_allow)
+        self.assertIn("pg_catalog.acldefault('r', c.relowner)", public_allow)
+        self.assertIn("IS TRUE", public_allow)
+        self.assertIn("IS FALSE", public_deny)
+        self.assertIn("pg_catalog.pg_roles r WHERE r.rolname='contract_missing_role'", missing_role_deny)
+        self.assertIn("IS TRUE", missing_role_deny)
+
+    def test_function_execute_checks_distinguish_public_and_missing_roles(self) -> None:
+        contract = copy.deepcopy(self.valid)
+        function = contract["capabilities"]["functions"][0]
+        function["execute"] = {"allow": ["public"], "deny": ["contract_missing_role"]}
+        sql = dict(build_checks(validate_contract(contract)))
+        public_allow = sql["function public.fixture_lookup(uuid) EXECUTE for public"]
+        missing_role_deny = sql["function public.fixture_lookup(uuid) EXECUTE denied for contract_missing_role"]
+        self.assertIn("acl.grantee=0", public_allow)
+        self.assertIn("pg_catalog.aclexplode", public_allow)
+        self.assertIn("pg_catalog.acldefault('f', p.proowner)", public_allow)
+        self.assertIn("IS TRUE", public_allow)
+        self.assertIn("pg_catalog.pg_roles r WHERE r.rolname='contract_missing_role'", missing_role_deny)
+        self.assertIn("IS TRUE", missing_role_deny)
 
     def test_set_null_columns_distinguishes_all_columns_from_subset(self) -> None:
         contract = copy.deepcopy(self.valid)

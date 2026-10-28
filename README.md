@@ -51,17 +51,15 @@ DevとProdは個別に照合し、両方の結果をレビューする。migrati
 
 `.github/workflows/production-db-check.yml`は`workflow_dispatch`専用で、mainからの実行だけを受け付ける。実行時にdispatch refと最新main SHAを確認し、履歴が`IN_SYNC`であること、Readerの最小権限、Reader bootstrap、RPC、AI quota、ACLの整合性を読み取り専用SQLで検査する。接続・履歴・診断エラーはすべて失敗扱い。PR CIからは本番へ接続せず、workflowはmigration適用や書き込みを行わない。
 
-このEnvironmentはまだ自動作成・設定されない前提。workflowをmainへマージする前に、GitHub Settingsで次の順に人が設定する。
+workflowはEnvironmentや資格情報を作成・変更しない。手動実行前にGitHub Settingsで`production-db-check`が存在し、Deployment branchesが`main`だけに制限され、以下の既存設定が正しいことを確認する。
 
-1. `production-db-check` Environmentを作成
-2. Deployment branchesをSelected branches and tagsにし、`main`だけを許可
-3. Environment Variablesを設定
+1. Environment Variables
    - `PROD_SUPABASE_POOLER_HOST`: ProdプロジェクトのConnect画面からコピーしたSession Poolerのhostのみ（URL・portなし）
    - `PROD_SUPABASE_PROJECT_REF`: 同じProdプロジェクトのproject ref
-4. Environment Secretを設定
+2. Environment Secret
    - `MIGRATION_READER_PASSWORD`: 既存`migration_preflight_login`専用のReaderパスワード
-5. Hostとproject refの組み合わせ、Reader専用パスワードの所有者、Environmentのmain制限を別の担当者がレビュー
-6. 設定完了後にPRをmainへマージし、Actions画面から`main`を選んで手動実行
+3. Hostとproject refの組み合わせ、Reader専用パスワードの所有者、Environmentのmain制限を確認
+4. 承認後にActions画面から`main`を選んで手動実行
 
 workflowはSession Poolerのhost形式と、Reader専用username、port `5432`、database `postgres`、SSL `require`、secretの存在を接続前に確認する。Supabaseの共有Session Poolerはport `5432`を使い、custom roleのusernameは`<role>.<project-ref>`形式。[Supabase接続ドキュメント](https://supabase.com/docs/guides/database/connecting-to-postgres)
 
@@ -69,14 +67,16 @@ Environment未設定、変数・secret欠落、main以外からのdispatch、最
 
 ## アプリDB互換性契約
 
-契約形式v1、カタログ検証器、静的検査と実動作検査の境界、契約SHA固定案は[DB互換性契約の設計](docs/db-compatibility-contracts.md)を参照。検証器は契約ファイルを厳密に検証し、PostgreSQLカタログのみをread-only transactionで照合する。`scripts/fixtures/db-contract-v1.example.json`は形式・テスト専用で、receipt-managerまたはprice-memoの実契約ではない。
+契約形式v1、カタログ検証器、静的検査と実動作検査の境界、固定revisionの取得方式は[DB互換性契約の設計](docs/db-compatibility-contracts.md)を参照。検証器はPostgreSQLカタログのみをread-only transactionで照合する。`scripts/fixtures/db-contract-v1.example.json`は形式・テスト専用で、アプリの実契約ではない。
 
 ```sh
 python3 scripts/check-db-contract.py scripts/fixtures/db-contract-v1.example.json --validate-only
 python3 scripts/check-db-contract.py path/to/consumer-owned-contract.json
 ```
 
-2つ目のコマンドは呼び出し元の`PG*`接続環境を使う。契約の検査に業務テーブル行のSELECTは不要。成功表示はカタログ上の静的検査のみを意味し、RLS実動作・Authユーザー間分離・RPC結果・Realtime配信を保証しない。
+shared側から固定SHAの両契約を検証するには`.github/workflows/consumer-db-contract-check.yml`をmainから手動実行する。このworkflowは公開GitHub API/raw URLから契約を取得し、DB接続前に両方の形式を検証してから既存Reader資格情報で照合する。PR CIや通常の`npm run check`はホストDBへ接続しない。
+
+カタログ照合に業務テーブル行のSELECTは不要。成功表示はカタログ上の静的検査のみを意味し、RLS実動作・Authユーザー間分離・RPC結果・Realtime配信を保証しない。migration履歴の一致確認は既存の本番Reader workflowで独立して行う。
 
 ## Migrationの不変性
 
