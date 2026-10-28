@@ -159,6 +159,36 @@ grep -Eiq 'permission denied|read-only transaction' "$output" || {
   exit 1
 }
 python3 scripts/check-db-contract.py scripts/fixtures/db-contract-v1.example.json
+python3 - <<'PY'
+import copy
+from pathlib import Path
+
+from scripts.db_contract import _literal, build_checks, load_contract, verify_catalog
+
+contract = load_contract(Path("scripts/fixtures/db-contract-v1.example.json"))
+template = contract["capabilities"]["tables"][0]
+contract["capabilities"]["tables"] = [
+    {**copy.deepcopy(template), "name": f"large_contract_table_{index:04d}"}
+    for index in range(12)
+]
+checks = build_checks(contract)
+rows = ",\n".join(
+    f"({index}, {_literal(label)}, ({predicate}))"
+    for index, (label, predicate) in enumerate(checks)
+)
+sql = (
+    "BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout='30s'; "
+    "SELECT CASE WHEN passed THEN 't' ELSE 'f' END FROM (VALUES\n"
+    f"{rows}\n) AS contract_checks(ord, label, passed) ORDER BY ord; COMMIT;"
+)
+sql_bytes = len(sql.encode("utf-8"))
+if sql_bytes <= 131_072:
+    raise SystemExit(f"Large contract query fixture is too small: {sql_bytes} bytes")
+results = verify_catalog(contract)
+if len(results) != len(checks) or not any(not result.passed for result in results):
+    raise SystemExit("Large contract query did not return the expected catalog results")
+print(f"PASS: {len(checks)} catalog assertions ({sql_bytes} SQL bytes) execute as a minimum Reader")
+PY
 python3 - "$contracts_dir" <<'PY'
 import json
 import sys
