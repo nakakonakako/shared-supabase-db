@@ -25,7 +25,7 @@ CONTRACTS = (
         "price-memo",
         "nakakonakako/price-memo",
         "db-contracts/price-memo.json",
-        "9ed2ae9ff1b5d9cac19141ffde41a3321d225051",
+        "7620cc8e43ef1defeaa0700d6ad0d509097ae52d",
     ),
     ConsumerContract(
         "receipt-manager",
