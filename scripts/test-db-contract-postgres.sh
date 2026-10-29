@@ -41,8 +41,9 @@ not_valid_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-not-valid.XXXXXX")"
 advanced_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-advanced.XXXXXX")"
 public_acl_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-public-acl.XXXXXX")"
 function_acl_contract="$(mktemp "${TMPDIR:-/tmp}/db-contract-function-acl.XXXXXX")"
+targeted_contract_backup="$(mktemp "${TMPDIR:-/tmp}/db-contract-targeted-backup.XXXXXX")"
 contracts_dir="$(mktemp -d "${TMPDIR:-/tmp}/db-contract-pinned-fixtures.XXXXXX")"
-trap 'rm -rf -- "$contracts_dir"; rm -f -- "$output" "$not_valid_contract" "$advanced_contract" "$public_acl_contract" "$function_acl_contract"' EXIT INT TERM
+trap 'rm -rf -- "$contracts_dir"; rm -f -- "$output" "$not_valid_contract" "$advanced_contract" "$public_acl_contract" "$function_acl_contract" "$targeted_contract_backup"' EXIT INT TERM
 
 fresh="$(psql "$DB_CONTRACT_TEST_DATABASE_URL" -X -w -v ON_ERROR_STOP=1 -Atqc "
   SELECT pg_catalog.to_regnamespace('auth') IS NULL
@@ -208,6 +209,46 @@ grep -Fq 'price-memo: STATIC PASS' "$output"
 grep -Fq 'receipt-manager: STATIC PASS' "$output"
 grep -Fq 'aggregate: STATIC PASS (2 contracts)' "$output"
 echo "PASS: two pinned contract results aggregate to STATIC PASS"
+for app_id in price-memo receipt-manager; do
+  python3 scripts/verify-consumer-db-contracts.py \
+    --contracts-dir "$contracts_dir" --app-id "$app_id" \
+    --app-commit 0123456789abcdef0123456789abcdef01234567 >"$output" 2>&1 || {
+      cat "$output" >&2
+      echo "Targeted $app_id contract failed against the disposable PostgreSQL catalog." >&2
+      exit 1
+    }
+  grep -Fq "$app_id: STATIC PASS" "$output"
+  grep -Fq 'aggregate: STATIC PASS (1 contract)' "$output"
+done
+echo "PASS: each deployed-app revision can be checked independently against the disposable PostgreSQL catalog"
+cp "$contracts_dir/price-memo.json" "$targeted_contract_backup"
+python3 - "$contracts_dir/price-memo.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["capabilities"]["tables"][0]["columns"][0]["type"] = "text"
+path.write_text(json.dumps(contract), encoding="utf-8")
+PY
+if python3 scripts/verify-consumer-db-contracts.py \
+  --contracts-dir "$contracts_dir" --app-id price-memo \
+  --app-commit 0123456789abcdef0123456789abcdef01234567 >"$output" 2>&1; then
+  echo "Targeted contract verification incorrectly accepted a catalog mismatch." >&2
+  exit 1
+fi
+grep -Fq 'price-memo: CONTRACT MISMATCH' "$output"
+grep -Fq 'DB contract aggregate: FAIL' "$output"
+mv "$targeted_contract_backup" "$contracts_dir/price-memo.json"
+echo "PASS: targeted deployed-app catalog mismatch fails closed"
+if python3 scripts/verify-consumer-db-contracts.py \
+  --contracts-dir "$contracts_dir" --app-id receipt-manager \
+  --app-commit invalid >"$output" 2>&1; then
+  echo "Targeted contract verification accepted a non-SHA deployment revision." >&2
+  exit 1
+fi
+echo "PASS: targeted contract verification rejects malformed deployment revisions"
 python3 - "$contracts_dir/receipt-manager.json" <<'PY'
 import json
 import sys

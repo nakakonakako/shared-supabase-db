@@ -86,3 +86,14 @@ def fetch_contract(spec: ConsumerContract) -> dict[str, Any]:
 def fetch_all_contracts() -> list[tuple[ConsumerContract, dict[str, Any]]]:
     """Fetch both contracts before returning, so callers can connect only after validation."""
     return [(spec, fetch_contract(spec)) for spec in CONTRACTS]
+
+
+def contract_for_revision(app_id: str, commit: str) -> ConsumerContract:
+    """Resolve an app-owned contract path at the exact deployment revision."""
+    matches = [spec for spec in CONTRACTS if spec.app_id == app_id]
+    if len(matches) != 1:
+        raise ContractFetchError("unsupported application id")
+    if not SHA.fullmatch(commit):
+        raise ContractFetchError("deployment revision is not a full 40-character commit SHA")
+    pinned = matches[0]
+    return ConsumerContract(pinned.app_id, pinned.repository, pinned.path, commit)

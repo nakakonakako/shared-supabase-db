@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-from consumer_db_contracts import CONTRACTS, ContractFetchError, fetch_contract
+from consumer_db_contracts import CONTRACTS, ContractFetchError, contract_for_revision, fetch_contract
 from db_contract import ContractError, VerificationError, load_contract, verify_catalog
 
 
@@ -17,11 +17,23 @@ def main() -> int:
     parser.add_argument("--psql", default="psql", help="psql executable (default: psql on PATH)")
     parser.add_argument("--contracts-dir", type=Path, help="use previously fetched and validated contracts from this directory")
     parser.add_argument("--validate-only", action="store_true", help="fetch and validate pinned contracts without connecting")
+    parser.add_argument("--app-id", choices=sorted(spec.app_id for spec in CONTRACTS), help="verify only this application")
+    parser.add_argument("--app-commit", help="full commit SHA of the application deployment")
     args = parser.parse_args()
+
+    if (args.app_id is None) != (args.app_commit is None):
+        parser.error("--app-id and --app-commit must be provided together")
+    if args.app_id:
+        try:
+            specs = (contract_for_revision(args.app_id, args.app_commit),)
+        except ContractFetchError as exc:
+            parser.error(str(exc))
+    else:
+        specs = CONTRACTS
 
     fetched = []
     retrieval_failed = False
-    for spec in CONTRACTS:
+    for spec in specs:
         try:
             if args.validate_only or args.contracts_dir is None:
                 contract = fetch_contract(spec)
@@ -52,7 +64,8 @@ def main() -> int:
                 json.dumps(contract, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
             )
             print(f"{spec.app_id}: CONTRACT FORMAT PASS (revision {spec.commit})")
-        print("DB contract format aggregate: PASS (2 contracts)")
+        contract_count = f"{len(specs)} contract" + ("s" if len(specs) != 1 else "")
+        print(f"DB contract format aggregate: PASS ({contract_count})")
         return 0
 
     failed = False
@@ -77,7 +90,8 @@ def main() -> int:
     if failed:
         print("DB contract aggregate: FAIL", file=sys.stderr)
         return 2 if execution_error else 1
-    print("DB contract aggregate: STATIC PASS (2 contracts)")
+    contract_count = f"{len(specs)} contract" + ("s" if len(specs) != 1 else "")
+    print(f"DB contract aggregate: STATIC PASS ({contract_count})")
     print("RLS row behavior, Auth-user isolation, RPC outcomes, and Realtime delivery require isolated runtime tests")
     return 0
 
