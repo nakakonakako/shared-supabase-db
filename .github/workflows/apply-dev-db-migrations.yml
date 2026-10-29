@@ -12,3 +12,4 @@ jobs:
     uses: ./.github/workflows/_apply-db-migrations.yml
     with:
       target: dev
+    secrets: inherit
