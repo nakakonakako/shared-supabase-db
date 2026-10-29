@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -514,6 +515,7 @@ class MigrationWriterTests(unittest.TestCase):
             self.assertNotIn("pull_request:", workflow)
             self.assertNotIn("contents: write", workflow)
             self.assertIn("uses: ./.github/workflows/_apply-db-migrations.yml", workflow)
+            self.assertIn("    secrets: inherit", workflow)
         self.assertIn("target: dev", dev)
         self.assertIn("target: production", prod)
         self.assertIn("actions: read", reusable)
@@ -539,6 +541,40 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertNotIn("|| vars.PROD_SUPABASE_POOLER_HOST", reusable)
         self.assertNotIn("|| secrets.MIGRATION_READER_PASSWORD", reusable)
         self.assertNotIn("supabase db push", reusable)
+
+        def job_section(name: str) -> str:
+            start = reusable.index(f"\n  {name}:\n")
+            next_match = re.search(r"\n  [A-Za-z0-9_-]+:\n", reusable[start + 1 :])
+            if next_match is None:
+                return reusable[start:]
+            return reusable[start : start + 1 + next_match.start()]
+
+        for name in ("preflight", "postflight"):
+            reader_job = job_section(name)
+            self.assertIn(
+                "name: ${{ inputs.target == 'dev' && 'development-db-check' || 'production-db-check' }}",
+                reader_job,
+            )
+            self.assertIn(
+                "PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD) || "
+                "(inputs.target == 'production' && secrets.MIGRATION_READER_PASSWORD) || '' }}",
+                reader_job,
+            )
+            self.assertNotIn("secrets.DEV_MIGRATION_SUPABASE_DB_PASSWORD", reader_job)
+            self.assertNotIn("secrets.MIGRATION_SUPABASE_DB_PASSWORD", reader_job)
+
+        writer_job = job_section("apply")
+        self.assertIn(
+            "name: ${{ inputs.target == 'dev' && 'development-db-apply' || 'production-db-apply' }}",
+            writer_job,
+        )
+        self.assertIn(
+            "PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_SUPABASE_DB_PASSWORD) || "
+            "(inputs.target == 'production' && secrets.MIGRATION_SUPABASE_DB_PASSWORD) || '' }}",
+            writer_job,
+        )
+        self.assertNotIn("secrets.DEV_MIGRATION_READER_PASSWORD", writer_job)
+        self.assertNotIn("secrets.MIGRATION_READER_PASSWORD", writer_job)
 
         probe = (ROOT / ".github/workflows/verify-dev-db-writer-connection.yml").read_text(encoding="utf-8")
         self.assertIn("workflow_dispatch:", probe)
