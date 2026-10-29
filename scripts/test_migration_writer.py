@@ -444,6 +444,20 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertIn("pg_catalog.shobj_description", output_path.read_text(encoding="utf-8"))
         self.assertNotIn("identity-probe-secret", success.stdout + success.stderr)
 
+        production = subprocess.run(
+            [sys.executable, str(IDENTITY_CHECK)],
+            env={
+                **base,
+                "DB_TARGET": "production",
+                "IDENTITY_PSQL_OUTPUT": "shared-supabase-db:target=production;project_ref=fsrbddgyysssqzyullrc",
+            },
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(production.returncode, 0, production.stderr)
+        self.assertIn("production server-side marker matches", production.stdout)
+        self.assertNotIn("identity-probe-secret", production.stdout + production.stderr)
+
         wrong_project = subprocess.run(
             [sys.executable, str(IDENTITY_CHECK)],
             env={**base, "IDENTITY_PSQL_OUTPUT": "shared-supabase-db:target=production;project_ref=fsrbddgyysssqzyullrc"},
@@ -542,6 +556,39 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertNotIn("|| secrets.MIGRATION_READER_PASSWORD", reusable)
         self.assertNotIn("supabase db push", reusable)
 
+        identity_steps = [
+            step
+            for step in re.split(r"(?m)^      - name: ", reusable)[1:]
+            if step.startswith("Verify database-side project identity as Reader\n")
+            or step.startswith("Verify database-side project identity as Writer\n")
+        ]
+        self.assertEqual(len(identity_steps), 3)
+        for step in identity_steps:
+            self.assertIn("DB_TARGET: ${{ inputs.target }}", step)
+            self.assertNotIn("if: inputs.target == 'dev'", step)
+
+        preflight_job = reusable.split("\n  preflight:\n", 1)[1].split(
+            "\n  verify-writer-environment:\n", 1
+        )[0]
+        self.assertLess(
+            preflight_job.index("Verify database-side project identity as Reader"),
+            preflight_job.index("Verify minimum Reader privileges"),
+        )
+        writer_job = reusable.split("\n  apply:\n", 1)[1].split("\n  postflight:\n", 1)[0]
+        self.assertLess(
+            writer_job.index("Prepare the protected Writer connection"),
+            writer_job.index("Verify database-side project identity as Writer"),
+        )
+        self.assertLess(
+            writer_job.index("Verify database-side project identity as Writer"),
+            writer_job.index("Apply pending migrations or safely no-op"),
+        )
+        postflight_job = reusable.split("\n  postflight:\n", 1)[1].split("\n  final-result:\n", 1)[0]
+        self.assertLess(
+            postflight_job.index("Verify database-side project identity as Reader"),
+            postflight_job.index("Require shared migration history IN_SYNC"),
+        )
+
         def job_section(name: str) -> str:
             start = reusable.index(f"\n  {name}:\n")
             next_match = re.search(r"\n  [A-Za-z0-9_-]+:\n", reusable[start + 1 :])
@@ -594,7 +641,7 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertIn("DEV_DB_WRITER_ENABLED: ${{ vars.DEV_DB_WRITER_ENABLED }}", reusable)
         self.assertLess(
             reusable.index("Require explicit Dev Writer handoff enablement"),
-            reusable.index("Verify Dev database-side project identity as Writer"),
+            reusable.index("Verify database-side project identity as Writer"),
         )
 
 
