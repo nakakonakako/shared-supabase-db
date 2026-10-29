@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -235,6 +236,27 @@ class ProductionDbCheckTests(unittest.TestCase):
         self.assertIn("secrets.MIGRATION_READER_PASSWORD", workflow)
         self.assertNotIn("MIGRATION_SUPABASE_DB_PASSWORD", workflow)
         self.assertNotIn("supabase db push", workflow)
+        identity_step = re.split(r"(?m)^      - name: ", workflow)[1:]
+        identity_step = next(
+            step for step in identity_step if step.startswith("Verify Prod database-side identity as Reader\n")
+        )
+        self.assertIn("DB_TARGET: production", identity_step)
+        self.assertIn("PGHOST: ${{ vars.PROD_SUPABASE_POOLER_HOST }}", identity_step)
+        self.assertIn("PGPORT: \"5432\"", identity_step)
+        self.assertIn("PGDATABASE: postgres", identity_step)
+        self.assertIn("PGUSER: migration_preflight_login.${{ vars.PROD_SUPABASE_PROJECT_REF }}", identity_step)
+        self.assertIn("PGPASSWORD: ${{ secrets.MIGRATION_READER_PASSWORD }}", identity_step)
+        self.assertIn("PGSSLMODE: require", identity_step)
+        self.assertIn("PGCONNECT_TIMEOUT: \"10\"", identity_step)
+        self.assertIn("scripts/verify-db-project-identity.py", identity_step)
+        self.assertLess(
+            workflow.index("Install PostgreSQL client"),
+            workflow.index("Verify Prod database-side identity as Reader"),
+        )
+        self.assertLess(
+            workflow.index("Verify Prod database-side identity as Reader"),
+            workflow.index("Require migration history in sync"),
+        )
         for diagnostic in DIAGNOSTICS:
             self.assertIn(diagnostic, (ROOT / "scripts/verify-production-db-integrity.py").read_text())
 

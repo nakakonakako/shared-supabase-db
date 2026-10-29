@@ -69,6 +69,17 @@ jobs:
         run: python3 scripts/validate-production-db-env.py
       - name: Install PostgreSQL client
         run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify Prod database-side identity as Reader
+        env:
+          DB_TARGET: production
+          PGHOST: ${{ vars.PROD_SUPABASE_POOLER_HOST }}
+          PGPORT: "5432"
+          PGDATABASE: postgres
+          PGUSER: migration_preflight_login.${{ vars.PROD_SUPABASE_PROJECT_REF }}
+          PGPASSWORD: ${{ secrets.MIGRATION_READER_PASSWORD }}
+          PGSSLMODE: require
+          PGCONNECT_TIMEOUT: "10"
+        run: python3 scripts/verify-db-project-identity.py
       - name: Require migration history in sync
         env:
           PGHOST: ${{ vars.PROD_SUPABASE_POOLER_HOST }}
