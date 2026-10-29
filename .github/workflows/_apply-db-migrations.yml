@@ -90,10 +90,9 @@ jobs:
         run: python3 scripts/validate-writer-db-env.py
       - name: Install PostgreSQL client
         run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
-      - name: Verify Dev database-side project identity as Reader
-        if: inputs.target == 'dev'
+      - name: Verify database-side project identity as Reader
         env:
-          DB_TARGET: dev
+          DB_TARGET: ${{ inputs.target }}
         run: python3 scripts/verify-db-project-identity.py
       - name: Verify minimum Reader privileges
         run: |
@@ -197,17 +196,16 @@ jobs:
             --only-immutability
       - name: Install PostgreSQL client
         run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
-      - name: Verify Dev database-side project identity as Writer
-        if: inputs.target == 'dev'
-        env:
-          DB_TARGET: dev
-        run: python3 scripts/verify-db-project-identity.py
       - name: Set up Supabase CLI
         uses: supabase/setup-cli@v3
         with:
           version: 2.117.0
       - name: Prepare the protected Writer connection
         run: python3 scripts/write-supabase-db-url.py --output "$GITHUB_ENV"
+      - name: Verify database-side project identity as Writer
+        env:
+          DB_TARGET: ${{ inputs.target }}
+        run: python3 scripts/verify-db-project-identity.py
       - name: Apply pending migrations or safely no-op
         run: |
           set -euo pipefail
@@ -259,10 +257,9 @@ jobs:
           python3 scripts/validate-writer-db-env.py
       - name: Install PostgreSQL client
         run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
-      - name: Verify Dev database-side project identity as Reader
-        if: inputs.target == 'dev'
+      - name: Verify database-side project identity as Reader
         env:
-          DB_TARGET: dev
+          DB_TARGET: ${{ inputs.target }}
         run: python3 scripts/verify-db-project-identity.py
       - name: Require shared migration history IN_SYNC
         run: python3 scripts/check-migration-history.py --migrations-dir supabase/migrations --repo . --base-ref "${GITHUB_SHA}^1"
