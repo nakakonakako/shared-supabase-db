@@ -1,0 +1,42 @@
+name: Consumer production DB compatibility check
+description: Read-only gate for shared migration history, production identity, and one deployed app contract
+inputs:
+  app-id:
+    description: price-memo or receipt-manager
+    required: true
+  app-commit-sha:
+    description: Full commit SHA being deployed; must equal the caller's main workflow SHA
+    required: true
+  reader-pooler-host:
+    description: Production Supabase pooler hostname from the production-db-check Environment
+    required: true
+  reader-project-ref:
+    description: Production Supabase project ref from the production-db-check Environment
+    required: true
+  reader-username:
+    description: Dedicated migration_preflight_login username
+    required: true
+  reader-password:
+    description: Dedicated migration_preflight_login password
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Run read-only deployment DB gate
+      shell: bash
+      env:
+        INPUT_APP_ID: ${{ inputs.app-id }}
+        INPUT_APP_COMMIT_SHA: ${{ inputs.app-commit-sha }}
+        DB_TARGET: production
+        DB_ENVIRONMENT: production-db-check
+        DB_CONNECTION_ROLE: reader
+        DB_POOLER_HOST: ${{ inputs.reader-pooler-host }}
+        DB_PROJECT_REF: ${{ inputs.reader-project-ref }}
+        PGHOST: ${{ inputs.reader-pooler-host }}
+        PGPORT: "5432"
+        PGDATABASE: postgres
+        PGUSER: ${{ inputs.reader-username }}
+        PGPASSWORD: ${{ inputs.reader-password }}
+        PGSSLMODE: require
+        PGCONNECT_TIMEOUT: "10"
+      run: python3 "$GITHUB_ACTION_PATH/../../../scripts/run_consumer_deploy_db_check.py"

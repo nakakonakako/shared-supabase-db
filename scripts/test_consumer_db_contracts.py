@@ -40,6 +40,32 @@ class ConsumerContractFetchTests(unittest.TestCase):
         self.assertIn(spec.commit, request.call_args_list[1].args[0])
         self.assertIn(spec.path, request.call_args_list[1].args[0])
 
+    def test_deployment_contract_uses_callers_exact_revision(self) -> None:
+        deployment_sha = "a" * 40
+        spec = consumer.contract_for_revision("price-memo", deployment_sha)
+        self.assertEqual(spec.repository, "nakakonakako/price-memo")
+        self.assertEqual(spec.path, "db-contracts/price-memo.json")
+        self.assertEqual(spec.commit, deployment_sha)
+        payloads = [json.dumps({"sha": deployment_sha}).encode(), json.dumps({**FIXTURE, "app_id": "price-memo"}).encode()]
+        with patch.object(consumer, "_request", side_effect=payloads) as request:
+            self.assertEqual(consumer.fetch_contract(spec)["app_id"], "price-memo")
+        self.assertIn(deployment_sha, request.call_args_list[0].args[0])
+        self.assertIn(deployment_sha, request.call_args_list[1].args[0])
+        with self.assertRaises(consumer.ContractFetchError):
+            consumer.contract_for_revision("price-memo", "short-sha")
+
+    def test_composite_action_uses_reader_only_configuration_and_is_documented(self) -> None:
+        action = (ROOT / ".github/actions/consumer-production-db-check/action.yml").read_text()
+        docs = (ROOT / "docs/db-compatibility-contracts.md").read_text()
+        self.assertIn("using: composite", action)
+        self.assertIn("PGPASSWORD: ${{ inputs.reader-password }}", action)
+        self.assertIn("DB_CONNECTION_ROLE: reader", action)
+        self.assertNotIn("contents: write", action)
+        self.assertIn("app-id: receipt-manager", docs)
+        self.assertIn("app-id: price-memo", docs)
+        self.assertIn("production-db-check", docs)
+        self.assertIn("<SHARED_ACTION_SHA>", docs)
+
     def test_mismatched_commit_and_invalid_contract_fail_closed(self) -> None:
         spec = consumer.CONTRACTS[0]
         with patch.object(consumer, "_request") as request:

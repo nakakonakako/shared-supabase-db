@@ -89,7 +89,63 @@ breaking変更が必要な場合はexpand/contractで分割する。先に新し
 
 アプリ互換性判定はmigration履歴全件の一致に依存しない。sharedの運用では既存のDev/Prod migration履歴照合を別の健全性ゲートとして維持する。必要な構造・権限を満たすことと、DB全体のmigration履歴が同じことは別判定である。
 
-## 今後のActions連携方式
+## デプロイ前Reader検証action
+
+共通の本番デプロイ前ゲートは`.github/actions/consumer-production-db-check`のcomposite actionを使用する。アプリのdeploy jobが`production-db-check` Environmentを指定し、Reader値だけをaction inputsへ渡す。actionは以下を全て満たした場合だけ成功する。
+
+1. callerが対象アプリの`main`で、指定SHAがworkflowの`github.sha`かつ公開`main`の先端であること
+2. 対象アプリの契約JSONをその完全SHAから取得し、commit APIのSHA一致とv1形式検証に成功すること。これはDB接続前に完了する
+3. sharedの公開`main`先端を完全SHAで一度解決し、そのrevisionをdetached fetchしてmigration filename/checksum inventoryを検証すること
+4. production Reader接続設定を検証し、DB markerがコード固定のProd project refと一致すること
+5. 取得したshared migration inventoryとDB履歴が`IN_SYNC`であること。`PENDING`、`REMOTE_ONLY`、`ERROR`は全て失敗
+6. 対象アプリの指定revisionから取得した契約がDB catalogに対して`STATIC PASS`であること
+7. 検証中にshared mainまたは対象アプリmainが進んでいないこと
+
+identity、history、contractは既存の読み取り専用スクリプトを再利用する。DB照合はReaderによるread-only transactionのみで、業務データをSELECTせず、RPCやmigrationを実行しない。履歴の正本はsharedだけであり、契約判定は対象アプリ一つだけを独立表示する。
+
+アプリのdeploy workflowには、デプロイ直前のjobへ次の形で組み込む。`uses`の`<SHARED_ACTION_SHA>`は、shared側actionを含むマージ済みcommitの完全40桁SHAに置き換える。短縮SHA、tag、branchは使用しない。両例とも`${{ github.sha }}`を渡し、actionはrepository/ref/SHAを再確認する。
+
+```yaml
+permissions:
+  contents: read
+
+jobs:
+  production-preflight:
+    if: github.ref == 'refs/heads/main'
+    environment: production-db-check
+    steps:
+      - uses: nakakonakako/shared-supabase-db/.github/actions/consumer-production-db-check@<SHARED_ACTION_SHA>
+        with:
+          app-id: receipt-manager
+          app-commit-sha: ${{ github.sha }}
+          reader-pooler-host: ${{ vars.PROD_SUPABASE_POOLER_HOST }}
+          reader-project-ref: ${{ vars.PROD_SUPABASE_PROJECT_REF }}
+          reader-username: migration_preflight_login.${{ vars.PROD_SUPABASE_PROJECT_REF }}
+          reader-password: ${{ secrets.MIGRATION_READER_PASSWORD }}
+```
+
+`price-memo`のjobでは同じinputを使い、次のように対象IDだけを変える。
+
+```yaml
+      - uses: nakakonakako/shared-supabase-db/.github/actions/consumer-production-db-check@<SHARED_ACTION_SHA>
+        with:
+          app-id: price-memo
+          app-commit-sha: ${{ github.sha }}
+          reader-pooler-host: ${{ vars.PROD_SUPABASE_POOLER_HOST }}
+          reader-project-ref: ${{ vars.PROD_SUPABASE_PROJECT_REF }}
+          reader-username: migration_preflight_login.${{ vars.PROD_SUPABASE_PROJECT_REF }}
+          reader-password: ${{ secrets.MIGRATION_READER_PASSWORD }}
+```
+
+既存deploy jobでは同じjobのbuild/deployより前にこのaction stepを置き、失敗時に後続が実行されない依存関係にする。PR jobへEnvironmentやReader値を渡さない。
+
+各アプリリポジトリで必要な手動Environment設定は、既存の`production-db-check`をmain限定にし、`MIGRATION_READER_PASSWORD`をEnvironment Secretとして、`PROD_SUPABASE_POOLER_HOST`と`PROD_SUPABASE_PROJECT_REF`をEnvironment Variableとして設定すること。project refは`fsrbddgyysssqzyullrc`。専用Reader LOGINは`migration_preflight_login.<project-ref>`、SSLは必須。Writer資格情報はこのactionに渡さない。本変更ではEnvironment/Secretを作成・変更せず、実接続も実行しない。runnerには`python3`、`git`、`psql`が必要。
+
+契約revisionはactionが`${{ github.sha }}`のアプリリポジトリから直接取得するため、sharedに格納した初期固定契約SHAをデプロイ判定には使わない。shared action/検証ロジックを変更した場合は、変更をmainへマージ後に両アプリの`uses`をその新しい完全commit SHAへ更新する。新migration追加だけの場合はaction SHA更新は不要で、毎回実行時に最新shared mainのmigration inventoryを固定取得する。実行中にshared mainが変わった場合はfail-closedとなり再実行が必要。
+
+このゲートはmigration履歴が厳密に`IN_SYNC`の場合しか通さない。そのためexpand/contract中にshared migrationが未適用ならアプリdeployも停止する。将来PENDING migration適用を伴う順序が必要なら、別途Writer orchestrationと互換性状態遷移を設計する。このactionをmigration applyの代替として使用しない。
+
+## 他のActions連携方式
 
 | 方式 | 資格情報 | 保守・簡潔さ | 評価 |
 |---|---|---|---|

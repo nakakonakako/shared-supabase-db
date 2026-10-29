@@ -8,15 +8,19 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-MIGRATIONS = ROOT / "supabase" / "migrations"
-CHECKSUMS = MIGRATIONS / "SHA256SUMS"
 NAME = re.compile(r"^(\d{14})_[A-Za-z0-9][A-Za-z0-9_-]*\.sql$")
 INITIAL_BASELINE_COUNT = 14
 
 
 def main() -> int:
-    files = sorted(MIGRATIONS.glob("*.sql"))
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1], help="shared repository checkout")
+    args = parser.parse_args()
+    migrations = args.repo / "supabase" / "migrations"
+    checksums = migrations / "SHA256SUMS"
+    files = sorted(migrations.glob("*.sql"))
     if len(files) < INITIAL_BASELINE_COUNT:
         print(f"expected at least {INITIAL_BASELINE_COUNT} baseline migrations, found {len(files)}", file=sys.stderr)
         return 1
@@ -34,7 +38,7 @@ def main() -> int:
 
     expected: dict[str, str] = {}
     try:
-        for line in CHECKSUMS.read_text(encoding="utf-8").splitlines():
+        for line in checksums.read_text(encoding="utf-8").splitlines():
             digest, relative = line.split(maxsplit=1)
             relative = relative.removeprefix("*")
             name = Path(relative).name
