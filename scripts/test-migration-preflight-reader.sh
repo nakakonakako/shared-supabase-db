@@ -243,8 +243,13 @@ export PGUSER=postgres PGPASSWORD=disposable-postgres-password
 
 mkdir -p "$test_root/migrations"
 touch "$test_root/migrations/20261027150000_reader.sql"
-python3 "$repo_root/scripts/check-migration-history.py" \
-  --migrations-dir "$test_root/migrations" >/dev/null
+plan_runner="$repo_root/scripts/run_dev_migration_plan.py"
+plan_summary="$test_root/dev-migration-plan-summary.md"
+export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
+python3 "$plan_runner" --migrations-dir "$test_root/migrations" \
+  --summary-file "$plan_summary"
+grep -Fq 'Migration history: **IN_SYNC**' "$plan_summary"
+
 touch "$test_root/migrations/20261028150000_pending.sql"
 if python3 "$repo_root/scripts/check-migration-history.py" \
   --migrations-dir "$test_root/migrations" >"$test_root/pending.out" 2>&1; then
@@ -252,12 +257,22 @@ if python3 "$repo_root/scripts/check-migration-history.py" \
   exit 1
 fi
 grep -q 'PENDING: 20261028150000' "$test_root/pending.out"
+rm "$plan_summary"
+python3 "$plan_runner" --migrations-dir "$test_root/migrations" \
+  --summary-file "$plan_summary"
+grep -Fq 'Migration history: **PENDING**' "$plan_summary"
+grep -Fq -- '- `20261028150000`' "$plan_summary"
+grep -Fq 'DB contract compatibility: not checked' "$plan_summary"
+
 export PGUSER=postgres PGPASSWORD=disposable-postgres-password
 psql -X -w -v ON_ERROR_STOP=1 -c \
   "INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('20261028150000')" >/dev/null
 export PGUSER=migration_preflight_login PGPASSWORD="$test_password"
-python3 "$repo_root/scripts/check-migration-history.py" \
-  --migrations-dir "$test_root/migrations" >/dev/null
+rm "$plan_summary"
+python3 "$plan_runner" --migrations-dir "$test_root/migrations" \
+  --summary-file "$plan_summary"
+grep -Fq 'Migration history: **IN_SYNC**' "$plan_summary"
+
 export PGUSER=postgres PGPASSWORD=disposable-postgres-password
 psql -X -w -v ON_ERROR_STOP=1 -c \
   "INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('20261029150000')" >/dev/null
@@ -268,6 +283,14 @@ if python3 "$repo_root/scripts/check-migration-history.py" \
   exit 1
 fi
 grep -q 'REMOTE_ONLY: 20261029150000' "$test_root/remote-only.out"
+rm "$plan_summary"
+if python3 "$plan_runner" --migrations-dir "$test_root/migrations" \
+  --summary-file "$plan_summary" >"$test_root/plan-remote-only.out" 2>&1; then
+  echo "The Reader-only plan treated REMOTE_ONLY as success." >&2
+  exit 1
+fi
+grep -Fq 'Migration history: **REMOTE_ONLY**' "$plan_summary"
+
 export PGUSER=postgres PGPASSWORD=disposable-postgres-password
 psql -X -w -v ON_ERROR_STOP=1 -c \
   "INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('malformed')" >/dev/null
@@ -278,6 +301,14 @@ if python3 "$repo_root/scripts/check-migration-history.py" \
   exit 1
 fi
 grep -q 'malformed version' "$test_root/malformed.out"
+rm "$plan_summary"
+if python3 "$plan_runner" --migrations-dir "$test_root/migrations" \
+  --summary-file "$plan_summary" >"$test_root/plan-error.out" 2>&1; then
+  echo "The Reader-only plan treated ERROR as success." >&2
+  exit 1
+fi
+grep -Fq 'Migration history: **ERROR**' "$plan_summary"
+echo "PASS: PostgreSQL 17 Reader-only migration plan classifies IN_SYNC, PENDING, REMOTE_ONLY, and ERROR"
 
 expect_denied() {
   local label="$1"

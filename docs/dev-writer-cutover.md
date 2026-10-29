@@ -2,9 +2,15 @@
 
 ## 現状と境界
 
-2026-10-29にGitHubの公開設定メタデータで確認した範囲では、shared repositoryに`development-db-check`は存在し、Dev Reader用の変数`DEV_SUPABASE_POOLER_HOST`、`DEV_SUPABASE_PROJECT_REF`とSecret名`DEV_MIGRATION_READER_PASSWORD`が登録済み。値とSecret本文は読み取っていない。`development-db-apply`は未作成。receipt-managerには`production-db-check`のみがあり、Dev向けGitHub Environmentはない。
+現状は次の通り。Environment/Secretの値は読み取らず、GitHubの設定値を変更しない。
 
-receipt-managerの`npm run db:push`はローカル端末からDevへ接続するWriter経路。`scripts/db-push.sh`は接続先をDev refに限定し、migration listとdry-runを表示し、TTYで`apply`を要求してからlinked projectへ適用する。sharedへ切り替えた後もこのコマンドが使えると二重Writer経路が残る。切替完了後のreceipt-manager専用PRで、linked Devへの適用部分を拒否またはplan-onlyにする。`db:plan`、ローカルSupabase開発、dry-runの利便性は維持する。旧経路を閉じるPRはshared Writerの安全な準備完了まで作らない。
+- `development-db-check`にはDev Reader用の接続変数と`DEV_MIGRATION_READER_PASSWORD`が設定済み
+- `development-db-apply`はmain限定の保護設定で存在し、Dev Writer用変数と`DEV_MIGRATION_SUPABASE_DB_PASSWORD`が設定済み
+- Dev Writer資格情報によるread-only接続・identity検証は成功済み
+- `DEV_DB_WRITER_ENABLED=false`。Dev DB passwordは未ローテーション
+- receipt-manager PR #39はマージ済み。`npm run db:push`は環境準備・パスワード要求・Supabase CLI実行前に停止
+
+コード上の旧`db:push`停止とDB password失効は別対策。現行のDev passwordが有効な間は、ローカルに残った資格情報から直接Supabase CLIや他のPostgreSQLクライアントを使える可能性がある。Writer有効化の前にpasswordをローテーションし、旧値を失効させる。
 
 `aws-1-ap-northeast-1.pooler.supabase.com`は現在Dev/Prodで共通するshared pooler hostであり、project identityには使えない。shared workflowに固定したproject refとSupavisor usernameの整合性検査は、接続要求の設定を検査するだけでサーバーのidentity証明ではない。Supabaseの接続仕様ではshared poolerのusernameにproject refを含めるが、これは接続先選択情報としてクライアントから送る値である。[Supabase接続仕様](https://supabase.com/docs/guides/database/connecting-to-postgres)、[Supavisor tenant routing](https://supabase.github.io/supavisor/connecting/overview/)。PostgreSQLの標準catalogにはSupabase project refを返す読取専用の識別列がない。
 
@@ -25,17 +31,17 @@ COMMENT ON DATABASE postgres IS
 
 `development-db-check`は既存Reader専用Environmentとして維持する。新たなReader権限や資格情報は追加しない。
 
-`development-db-apply`は切替準備時に作成し、次を設定する。
+`development-db-apply`は作成・保護済み。設定項目は次の通り。Secret値は取得していない。
 
 | 種別 | 名前 | 設定 |
 | --- | --- | --- |
-| Deployment branches | Selected branches and tags | `main` branch 1件のみ |
+| Deployment branches | Selected branches and tags | `main` branch 1件 |
 | Protection | Administrator bypass | 無効 |
-| Protection | Required reviewers | 1名以上、Prevent self-review無効 |
+| Protection | Required reviewers | 1名、Prevent self-review無効 |
 | Environment variable | `DEV_SUPABASE_POOLER_HOST` | Dev Session Pooler host |
-| Environment variable | `DEV_SUPABASE_PROJECT_REF` | Dev Project Ref。コード固定値と一致させる |
-| Environment variable | `DEV_DB_WRITER_ENABLED` | 初期値`false`。旧Writerを閉じた後だけ`true` |
-| Environment secret | `DEV_MIGRATION_SUPABASE_DB_PASSWORD` | Dev `postgres` role用password |
+| Environment variable | `DEV_SUPABASE_PROJECT_REF` | Dev Project Ref。コード固定値と一致 |
+| Environment variable | `DEV_DB_WRITER_ENABLED` | `false` |
+| Environment secret | `DEV_MIGRATION_SUPABASE_DB_PASSWORD` | Dev `postgres` role用password。未ローテーション |
 
 Writer Environmentを作成してSecretを登録しただけではapplyは有効にならない。shared apply workflowは`DEV_DB_WRITER_ENABLED`が厳密に`true`でなければDevのWriter jobを失敗させる。Dev Writer接続確認workflowはフラグが`false`の間も実行でき、migration適用コマンドを持たない。protection metadata APIがEnvironment、main-only policy、Required reviewers、self-review設定を確認できない場合は接続前に停止する。
 
@@ -45,20 +51,19 @@ Writer Environmentを作成してSecretを登録しただけではapplyは有効
 
 順番を変えず、各段階の記録を確認する。
 
-1. DB管理者が別のDashboardセッションでDev Project Refを照合し、Dev identity markerを設定
-2. 既存の`development-db-check` Reader設定が揃い、sharedのDev contract checkが成功することを確認
-3. `development-db-apply`をmain-only、bypass無効、reviewer必須/Prevent self-review無効で作成し、Writer variable/Secretを登録。`DEV_DB_WRITER_ENABLED=false`を維持
-4. `Verify Dev DB Writer credentials (read-only)`をmainから手動実行。先にReader最小権限とReader identityを検査し、その後Protected Writer Environment承認を要求し、Writer credentialによるidentity queryだけを実行
-5. `IN_SYNC`のshared apply runはReader preflight/postflightを検証する安全なno-op。Writer jobはskipされるため、Writer credential接続成功の証拠にしない
-6. 旧receipt-manager `db:push` hosted apply経路を専用PRで閉じ、必要なDev password rotationを完了。旧passwordで接続できないことを管理者が安全に確認
-7. Writer identity probeを新passwordで再実行。成功後にのみ`DEV_DB_WRITER_ENABLED=true`へ変更
-8. 承認済みの実際のPENDING migrationがある場合に限り、shared Dev workflowを手動実行。Reader preflight、identity、履歴、両アプリ契約、Environment承認、Writer identity、適用、Reader postflightを確認
+1. **完了:** Dev identity marker、Reader検証、Dev Writer資格情報のread-only identity probe
+2. **完了:** `development-db-apply`のmain-only保護とWriter用Environment設定。`DEV_DB_WRITER_ENABLED=false`を維持
+3. **完了:** receipt-manager PR #39で旧`npm run db:push`経路を停止
+4. **Reader migration plan:** `.github/workflows/dev-migration-plan.yml`をmainから手動実行。shared inventory/checksum、Dev identity、Reader権限、migration履歴を検査し、`IN_SYNC`または予定version付き`PENDING`を表示する。このworkflowはWriter資格情報、Supabase CLI dry-run、DB契約検証を使わない。契約検証はDev consumer contract workflowで別途行う
+5. Dev DB passwordをローテーションし、shared `development-db-apply` の`DEV_MIGRATION_SUPABASE_DB_PASSWORD`を新値へ更新。旧値を端末・パスワード保管先から削除
+6. `DEV_DB_WRITER_ENABLED=false`のままWriter read-only identity probeを再実行。成功後も、明示的な切替承認まではfalseを維持
+7. 実際のPENDING migrationを適用する段階でのみWriterを有効化し、Reader preflight、両アプリ契約、identity、適用、Reader postflightを確認
 
-適用能力の実証は8の実際のDev migrationで行う。no-op用の不要なmigrationは追加しない。PR #9の隔離PostgreSQL 17 PENDING testはCLI/状態遷移の隔離検証であり、hosted DevへのWriter接続や適用の証拠ではない。
+適用能力の実証は7の実際のDev migrationで行う。no-op用の不要なmigrationは追加しない。PR #9の隔離PostgreSQL 17 PENDING testはCLI/状態遷移の隔離検証であり、hosted DevへのWriter接続や適用の証拠ではない。
 
 ## 二重Writer防止と復旧
 
-別repository間のGitHub Actions concurrencyは排他として扱わない。旧`db:push`を閉じ、必要ならDev DB passwordをrotateして端末に残る旧credentialを無効化し、sharedの環境フラグが`false`であることを確認してから共有applyを有効化する。切替中はmigration適用を凍結する。共有Writer有効化後は、receipt-managerのローカルコマンドからDevへ適用できない状態を保つ。ローカル開発と`db:plan`のdry-runは残す。
+別repository間のGitHub Actions concurrencyは排他として扱わない。旧`db:push`停止に加えてDev DB passwordをローテーションし、端末に残る旧credentialを無効化する。共有Writerを有効化するまで`DEV_DB_WRITER_ENABLED=false`を保ち、切替中はmigration適用を凍結する。今回追加するReader migration planはDev DB履歴を確認する。ローカル開発は引き続き可能で、Dev側のmigration状態照会はshared workflowで行う。
 
 - Reader identity/preflight失敗: Writerへ進まず、markerとDev Project Refを管理者が別途照合。Reader権限を増やさない
 - Writer credential probe失敗: `DEV_DB_WRITER_ENABLED=false`のまま停止。Secret値をログに出さず、DB管理者がcredentialとmarkerを個別確認してからprobeを再実行
