@@ -103,18 +103,38 @@ breaking変更が必要な場合はexpand/contractで分割する。先に新し
 
 identity、history、contractは既存の読み取り専用スクリプトを再利用する。DB照合はReaderによるread-only transactionのみで、業務データをSELECTせず、RPCやmigrationを実行しない。履歴の正本はsharedだけであり、契約判定は対象アプリ一つだけを独立表示する。
 
-アプリのdeploy workflowには、デプロイ直前のjobへ次の形で組み込む。`uses`の`<SHARED_ACTION_SHA>`は、shared側actionを含むマージ済みcommitの完全40桁SHAに置き換える。短縮SHA、tag、branchは使用しない。両例とも`${{ github.sha }}`を渡し、actionはrepository/ref/SHAを再確認する。
+各アプリのdeploy workflowには、デプロイ直前に同じpreflight jobを置く。以下は`receipt-manager`向けのworkflow例で、`runs-on`を明記し、必要なPython、Git、PostgreSQL clientをrunnerへ準備する。既存のbuild/deploy stepsは、このaction stepの後ろに同じjob内で置き、preflight失敗時に実行させない。`uses`の例示SHAは40桁の形式例であり、実際にはshared側actionを含むマージ済みcommit SHAに置き換える。短縮SHA、tag、branchは使用しない。
 
 ```yaml
+name: Production DB preflight
+
+on:
+  workflow_dispatch:
+
 permissions:
   contents: read
 
 jobs:
   production-preflight:
     if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
     environment: production-db-check
     steps:
-      - uses: nakakonakako/shared-supabase-db/.github/actions/consumer-production-db-check@<SHARED_ACTION_SHA>
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Git and PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends git postgresql-client
+          command -v python3
+          command -v git
+          command -v psql
+
+      - uses: nakakonakako/shared-supabase-db/.github/actions/consumer-production-db-check@0123456789abcdef0123456789abcdef01234567
         with:
           app-id: receipt-manager
           app-commit-sha: ${{ github.sha }}
@@ -122,12 +142,14 @@ jobs:
           reader-project-ref: ${{ vars.PROD_SUPABASE_PROJECT_REF }}
           reader-username: migration_preflight_login.${{ vars.PROD_SUPABASE_PROJECT_REF }}
           reader-password: ${{ secrets.MIGRATION_READER_PASSWORD }}
+
+      # Put the existing build and deployment steps here, after the DB gate.
 ```
 
-`price-memo`のjobでは同じinputを使い、次のように対象IDだけを変える。
+`price-memo`リポジトリでも同じjobとtool setupを使う。action callは次のとおりで、`app-id`を`price-memo`にする。他のinputsはreceipt-manager例と同一。両アプリとも`${{ github.sha }}`を渡し、actionがrepository/ref/SHAを再確認する。
 
 ```yaml
-      - uses: nakakonakako/shared-supabase-db/.github/actions/consumer-production-db-check@<SHARED_ACTION_SHA>
+      - uses: nakakonakako/shared-supabase-db/.github/actions/consumer-production-db-check@0123456789abcdef0123456789abcdef01234567
         with:
           app-id: price-memo
           app-commit-sha: ${{ github.sha }}
@@ -136,9 +158,6 @@ jobs:
           reader-username: migration_preflight_login.${{ vars.PROD_SUPABASE_PROJECT_REF }}
           reader-password: ${{ secrets.MIGRATION_READER_PASSWORD }}
 ```
-
-既存deploy jobでは同じjobのbuild/deployより前にこのaction stepを置き、失敗時に後続が実行されない依存関係にする。PR jobへEnvironmentやReader値を渡さない。
-
 各アプリリポジトリで必要な手動Environment設定は、既存の`production-db-check`をmain限定にし、`MIGRATION_READER_PASSWORD`をEnvironment Secretとして、`PROD_SUPABASE_POOLER_HOST`と`PROD_SUPABASE_PROJECT_REF`をEnvironment Variableとして設定すること。project refは`fsrbddgyysssqzyullrc`。専用Reader LOGINは`migration_preflight_login.<project-ref>`、SSLは必須。Writer資格情報はこのactionに渡さない。本変更ではEnvironment/Secretを作成・変更せず、実接続も実行しない。runnerには`python3`、`git`、`psql`が必要。
 
 契約revisionはactionが`${{ github.sha }}`のアプリリポジトリから直接取得するため、sharedに格納した初期固定契約SHAをデプロイ判定には使わない。shared action/検証ロジックを変更した場合は、変更をmainへマージ後に両アプリの`uses`をその新しい完全commit SHAへ更新する。新migration追加だけの場合はaction SHA更新は不要で、毎回実行時に最新shared mainのmigration inventoryを固定取得する。実行中にshared mainが変わった場合はfail-closedとなり再実行が必要。
