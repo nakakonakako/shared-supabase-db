@@ -525,6 +525,40 @@ class MigrationWriterTests(unittest.TestCase):
         with self.assertRaises(module.EnvironmentError):
             module.validate(unknown_rule, main_policy, "production")
 
+        from io import BytesIO
+        from urllib.error import HTTPError, URLError
+        from unittest.mock import patch
+
+        token = "sensitive-token-fixture"
+        response_body = b"sensitive response body fixture"
+        for status, expected in (
+            (401, "GitHub API returned HTTP 401 (authentication failed)"),
+            (403, "GitHub API returned HTTP 403 (access denied or rate limited)"),
+            (404, "GitHub API returned HTTP 404 (resource not found or endpoint unavailable)"),
+            (429, "GitHub API returned HTTP 429 (rate limited)"),
+        ):
+            with self.subTest(status=status):
+                error = HTTPError(
+                    "https://api.github.com/private",
+                    status,
+                    "private reason",
+                    {},
+                    BytesIO(response_body),
+                )
+                with patch.object(module, "urlopen", side_effect=error):
+                    with self.assertRaises(module.EnvironmentError) as caught:
+                        module.github_get("https://api.github.com/private", token)
+                self.assertEqual(str(caught.exception), expected)
+                self.assertNotIn(token, str(caught.exception))
+                self.assertNotIn(response_body.decode(), str(caught.exception))
+
+        with patch.object(module, "urlopen", side_effect=URLError("sensitive network detail")):
+            with self.assertRaises(module.EnvironmentError) as network_error:
+                module.github_get("https://api.github.com/private", token)
+        self.assertEqual(str(network_error.exception), "GitHub API network request failed")
+        self.assertNotIn(token, str(network_error.exception))
+        self.assertNotIn("sensitive network detail", str(network_error.exception))
+
     def test_workflow_result_gate_covers_success_failure_and_unexpected_skip(self) -> None:
         def outcome(state: str, preflight: str, environment: str, apply: str, postflight: str) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
