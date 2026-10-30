@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import sys
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -30,8 +31,19 @@ def github_get(url: str, token: str) -> dict:
     try:
         with urlopen(request, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except (OSError, URLError, TimeoutError, UnicodeError, json.JSONDecodeError):
-        raise EnvironmentError("GitHub Environment protection metadata could not be read") from None
+    except HTTPError as error:
+        status_messages = {
+            401: "authentication failed",
+            403: "access denied or rate limited",
+            404: "resource not found or endpoint unavailable",
+            429: "rate limited",
+        }
+        detail = status_messages.get(error.code, "request rejected")
+        raise EnvironmentError(f"GitHub API returned HTTP {error.code} ({detail})") from None
+    except (URLError, TimeoutError, http.client.HTTPException, OSError):
+        raise EnvironmentError("GitHub API network request failed") from None
+    except (UnicodeError, json.JSONDecodeError):
+        raise EnvironmentError("GitHub API returned an invalid JSON response") from None
     if not isinstance(data, dict):
         raise EnvironmentError("GitHub Environment protection metadata was invalid")
     return data
