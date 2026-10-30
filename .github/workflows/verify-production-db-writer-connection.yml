@@ -1,0 +1,143 @@
+name: Verify Production DB Writer credentials (read-only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: shared-supabase-production-db-writer-identity-check
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require manual dispatch from main
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "Production Writer credential checks require manual dispatch from main." >&2
+            exit 1
+          fi
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require the latest main commit
+        run: python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+
+  verify-reader:
+    needs: prepare
+    if: needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: production-db-check
+    env:
+      DB_TARGET: production
+      DB_ENVIRONMENT: production-db-check
+      DB_POOLER_HOST: ${{ vars.PROD_SUPABASE_POOLER_HOST }}
+      DB_PROJECT_REF: ${{ vars.PROD_SUPABASE_PROJECT_REF }}
+      DB_CONNECTION_ROLE: reader
+      PROD_SUPABASE_POOLER_HOST: ${{ vars.PROD_SUPABASE_POOLER_HOST }}
+      PROD_SUPABASE_PROJECT_REF: ${{ vars.PROD_SUPABASE_PROJECT_REF }}
+      MIGRATION_READER_PASSWORD: ${{ secrets.MIGRATION_READER_PASSWORD }}
+      PGHOST: ${{ vars.PROD_SUPABASE_POOLER_HOST }}
+      PGPORT: "5432"
+      PGDATABASE: postgres
+      PGUSER: migration_preflight_login.${{ vars.PROD_SUPABASE_PROJECT_REF }}
+      PGPASSWORD: ${{ secrets.MIGRATION_READER_PASSWORD }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: "10"
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Recheck main and validate the Reader target
+        run: |
+          set -euo pipefail
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/validate-writer-db-env.py
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify shared migration history as Reader
+        run: python3 scripts/verify-production-writer-history.py --base-ref "$GITHUB_SHA"
+      - name: Verify Production DB identity marker as Reader
+        run: python3 scripts/verify-db-project-identity.py
+      - name: Verify Reader, RPC, AI quota, and ACL integrity
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-production-db-integrity.py \
+            --output "$RUNNER_TEMP/production-db-integrity.out"
+          grep -Fxq 'result=PASS' "$RUNNER_TEMP/production-db-integrity.out"
+
+  verify-writer-environment:
+    needs: verify-reader
+    if: needs.verify-reader.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      DB_TARGET: production
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require protected Production Writer Environment
+        run: python3 scripts/check-writer-environment.py
+
+  verify-writer-credentials:
+    needs: verify-writer-environment
+    if: needs.verify-writer-environment.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: production-db-apply
+    env:
+      DB_TARGET: production
+      DB_ENVIRONMENT: production-db-apply
+      DB_POOLER_HOST: ${{ vars.PROD_SUPABASE_POOLER_HOST }}
+      DB_PROJECT_REF: ${{ vars.PROD_SUPABASE_PROJECT_REF }}
+      DB_CONNECTION_ROLE: writer
+      PGHOST: ${{ vars.PROD_SUPABASE_POOLER_HOST }}
+      PGPORT: "5432"
+      PGDATABASE: postgres
+      PGUSER: postgres.${{ vars.PROD_SUPABASE_PROJECT_REF }}
+      PGPASSWORD: ${{ secrets.MIGRATION_SUPABASE_DB_PASSWORD }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: "10"
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Recheck main and validate the Writer target
+        run: |
+          set -euo pipefail
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/validate-writer-db-env.py
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify Writer authentication and database identity (read-only)
+        run: python3 scripts/verify-db-project-identity.py

@@ -19,6 +19,8 @@ URL_WRITER = ROOT / "scripts/write-supabase-db-url.py"
 WORKFLOW_RESULT = ROOT / "scripts/evaluate-db-migration-workflow.py"
 IDENTITY_CHECK = ROOT / "scripts/verify-db-project-identity.py"
 DEV_WRITER_GATE = ROOT / "scripts/require-dev-writer-enabled.py"
+PROD_WRITER_GATE = ROOT / "scripts/require-production-writer-enabled.py"
+PROD_WRITER_HISTORY = ROOT / "scripts/verify-production-writer-history.py"
 
 
 class MigrationWriterTests(unittest.TestCase):
@@ -93,6 +95,8 @@ class MigrationWriterTests(unittest.TestCase):
         *,
         secret: str = "do-not-log-secret",
         cli_capture: Path | None = None,
+        target: str = "dev",
+        production_writer_enabled: str | None = None,
     ):
         fake_psql = self.bin / "psql"
         fake_psql.write_text(
@@ -109,9 +113,14 @@ class MigrationWriterTests(unittest.TestCase):
         fake_psql.chmod(0o700)
         env = {
             **self.env,
+            "DB_TARGET": target,
             "FAKE_HISTORY": remote,
             "SUPABASE_DB_URL": "postgresql://" + "writer" + ":" + secret + "@localhost/postgres",
         }
+        if production_writer_enabled is None:
+            env.pop("PROD_DB_WRITER_ENABLED", None)
+        else:
+            env["PROD_DB_WRITER_ENABLED"] = production_writer_enabled
         if cli_capture:
             env["FAKE_CLI_CAPTURE"] = str(cli_capture)
         return subprocess.run(
@@ -253,6 +262,138 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertIn("Supabase migration command failed", failed.stderr)
         self.assertNotIn("do-not-log-secret", failed.stdout + failed.stderr)
 
+    def test_production_pending_requires_exact_enablement_before_supabase_cli(self) -> None:
+        marker = self.root / "production-cli-invoked"
+        cli = self.bin / "production-supabase"
+        cli.write_text(
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('called')\n",
+            encoding="utf-8",
+        )
+        cli.chmod(0o700)
+
+        for enabled in (None, "", "false", "TRUE", "yes"):
+            with self.subTest(enabled=enabled):
+                result = self._run_apply(
+                    "",
+                    cli,
+                    target="production",
+                    production_writer_enabled=enabled,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Production Writer is disabled", result.stderr)
+                self.assertNotIn("do-not-log-secret", result.stdout + result.stderr)
+                self.assertFalse(marker.exists())
+
+        enabled = self._run_apply(
+            "",
+            cli,
+            target="production",
+            production_writer_enabled="true",
+        )
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertIn("pending migrations submitted", enabled.stdout)
+        self.assertTrue(marker.exists())
+
+    def test_production_in_sync_remains_a_safe_noop_while_writer_is_disabled(self) -> None:
+        marker = self.root / "production-noop-cli-invoked"
+        cli = self.bin / "production-must-not-run"
+        cli.write_text(
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('called')\n"
+            "raise SystemExit(99)\n",
+            encoding="utf-8",
+        )
+        cli.chmod(0o700)
+        result = self._run_apply(
+            "20260101000000\n",
+            cli,
+            target="production",
+            production_writer_enabled="false",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("IN_SYNC; safe no-op", result.stdout)
+        self.assertFalse(marker.exists())
+
+    def test_production_writer_gate_is_strict_and_sanitized(self) -> None:
+        def check(value: str | None) -> subprocess.CompletedProcess[str]:
+            env = {**self.env}
+            if value is None:
+                env.pop("PROD_DB_WRITER_ENABLED", None)
+            else:
+                env["PROD_DB_WRITER_ENABLED"] = value
+            return subprocess.run(
+                [sys.executable, str(PROD_WRITER_GATE)], env=env, capture_output=True, text=True
+            )
+
+        self.assertEqual(check("true").returncode, 0)
+        for value in (None, "", "false", "TRUE", "yes"):
+            with self.subTest(value=value):
+                result = check(value)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Production Writer is disabled", result.stderr)
+
+    def test_production_writer_probe_history_allows_only_in_sync_and_valid_pending(self) -> None:
+        fake_psql = self.bin / "psql"
+        fake_psql.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "if os.environ.get('FAKE_PSQL_FAIL') == '1': sys.exit(2)\n"
+            "sys.stdout.write(os.environ.get('FAKE_REMOTE_HISTORY', ''))\n",
+            encoding="utf-8",
+        )
+        fake_psql.chmod(0o700)
+        cases = (
+            ("IN_SYNC", "20260101000000\n", 0, 0),
+            ("PENDING", "", 0, 0),
+            ("REMOTE_ONLY", "20260101000000\n20270101000000\n", 0, 2),
+            ("ERROR", "20270101000000\n", 0, 2),
+        )
+        for state, history, fail, expected in cases:
+            with self.subTest(state=state):
+                result = subprocess.run(
+                    [sys.executable, str(PROD_WRITER_HISTORY), "--base-ref", self.base_ref],
+                    cwd=self.repo,
+                    env={
+                        **self.env,
+                        "FAKE_REMOTE_HISTORY": history,
+                        "FAKE_PSQL_FAIL": str(fail),
+                    },
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                expected_log = f"Production Writer probe history: {state}"
+                self.assertIn(expected_log, result.stdout + result.stderr)
+
+        connection_failure = subprocess.run(
+            [sys.executable, str(PROD_WRITER_HISTORY), "--base-ref", self.base_ref],
+            cwd=self.repo,
+            env={**self.env, "FAKE_PSQL_FAIL": "1"},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(connection_failure.returncode, 2)
+        self.assertIn("history: ERROR", connection_failure.stderr)
+
+        spec = __import__("importlib.util", fromlist=["spec_from_file_location"])
+        module_spec = spec.spec_from_file_location("production_writer_history", PROD_WRITER_HISTORY)
+        assert module_spec and module_spec.loader
+        module = spec.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        for state, exit_code in (("IN_SYNC", 0), ("PENDING", 1)):
+            self.assertTrue(module.is_allowed_result(state, exit_code))
+        for state, exit_code in (
+            ("IN_SYNC", 1),
+            ("PENDING", 0),
+            ("PENDING", 2),
+            ("REMOTE_ONLY", 1),
+            ("ERROR", 2),
+        ):
+            self.assertFalse(module.is_allowed_result(state, exit_code))
+
     def test_in_sync_skips_supabase_cli_and_remote_only_fails_closed(self) -> None:
         marker = self.root / "cli-invoked"
         cli = self.bin / "must-not-run"
@@ -358,6 +499,9 @@ class MigrationWriterTests(unittest.TestCase):
             ],
         }
         self.assertIn("self-review is prevented", module.validate(team_reviewer, main_policy, "production"))
+        no_reviewer = {**base, "protection_rules": [base["protection_rules"][0]]}
+        with self.assertRaises(module.EnvironmentError):
+            module.validate(no_reviewer, main_policy, "production")
         invalid = {**base, "can_admins_bypass": True}
         with self.assertRaises(module.EnvironmentError):
             module.validate(invalid, main_policy, "production")
@@ -417,6 +561,54 @@ class MigrationWriterTests(unittest.TestCase):
                 result = check(value)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("complete the documented cutover", result.stderr)
+
+    def test_production_identity_probe_is_read_only_and_rejects_mismatch_or_auth_failure(self) -> None:
+        fake_psql = self.bin / "psql"
+        fake_psql.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "open(os.environ['IDENTITY_QUERY_CAPTURE'], 'w').write(sys.argv[-1])\n"
+            "if os.environ.get('IDENTITY_PSQL_FAIL') == '1':\n"
+            " sys.stderr.write('connection error ' + os.environ.get('PGPASSWORD', '') + '\\n'); raise SystemExit(2)\n"
+            "print(os.environ.get('IDENTITY_PSQL_OUTPUT', ''))\n",
+            encoding="utf-8",
+        )
+        fake_psql.chmod(0o700)
+        query_path = self.root / "production-identity-query.sql"
+        password = "production-writer-probe-secret"
+        base = {
+            **self.env,
+            "DB_TARGET": "production",
+            "PGPASSWORD": password,
+            "IDENTITY_QUERY_CAPTURE": str(query_path),
+            "IDENTITY_PSQL_OUTPUT": "shared-supabase-db:target=production;project_ref=fsrbddgyysssqzyullrc",
+        }
+        success = subprocess.run(
+            [sys.executable, str(IDENTITY_CHECK)], env=base, capture_output=True, text=True
+        )
+        self.assertEqual(success.returncode, 0, success.stderr)
+        query = query_path.read_text(encoding="utf-8")
+        self.assertIn("BEGIN TRANSACTION READ ONLY", query)
+        self.assertNotRegex(query, r"(?i)\b(insert|update|delete|create|alter|drop|truncate)\b")
+        self.assertNotIn(password, success.stdout + success.stderr)
+
+        mismatch = subprocess.run(
+            [sys.executable, str(IDENTITY_CHECK)],
+            env={**base, "IDENTITY_PSQL_OUTPUT": "shared-supabase-db:target=dev;project_ref=irgahixsuvtopiwmtkku"},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(mismatch.returncode, 1)
+        self.assertNotIn(password, mismatch.stdout + mismatch.stderr)
+
+        auth_failure = subprocess.run(
+            [sys.executable, str(IDENTITY_CHECK)],
+            env={**base, "IDENTITY_PSQL_FAIL": "1"},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(auth_failure.returncode, 2)
+        self.assertNotIn(password, auth_failure.stdout + auth_failure.stderr)
 
     def test_database_identity_verifier_uses_read_only_query_and_fails_closed(self) -> None:
         fake_psql = self.bin / "psql"
@@ -540,6 +732,13 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertIn("scripts/evaluate-db-migration-workflow.py", reusable)
         self.assertIn("scripts/verify-db-project-identity.py", reusable)
         self.assertIn("scripts/require-dev-writer-enabled.py", reusable)
+        self.assertIn("scripts/require-production-writer-enabled.py", reusable)
+        self.assertIn("PROD_DB_WRITER_ENABLED: ${{ vars.PROD_DB_WRITER_ENABLED }}", reusable)
+        self.assertIn("if: inputs.target == 'production'", reusable)
+        self.assertLess(
+            reusable.index("Require explicit Production Writer handoff enablement"),
+            reusable.index("Recheck main and Writer target after Environment approval"),
+        )
         self.assertIn("needs.preflight.outputs.state == 'IN_SYNC'", reusable)
         self.assertIn("needs.preflight.outputs.state == 'PENDING'", reusable)
         self.assertIn("needs.apply.result == 'failure'", reusable)
@@ -583,6 +782,14 @@ class MigrationWriterTests(unittest.TestCase):
             writer_job.index("Verify database-side project identity as Writer"),
             writer_job.index("Apply pending migrations or safely no-op"),
         )
+        self.assertLess(
+            writer_job.index("Require explicit Production Writer handoff enablement"),
+            writer_job.index("Apply pending migrations or safely no-op"),
+        )
+        self.assertIn(
+            "PROD_DB_WRITER_ENABLED: ${{ inputs.target == 'production' && vars.PROD_DB_WRITER_ENABLED || '' }}",
+            writer_job,
+        )
         postflight_job = reusable.split("\n  postflight:\n", 1)[1].split("\n  final-result:\n", 1)[0]
         self.assertLess(
             postflight_job.index("Verify database-side project identity as Reader"),
@@ -609,6 +816,30 @@ class MigrationWriterTests(unittest.TestCase):
             )
             self.assertNotIn("secrets.DEV_MIGRATION_SUPABASE_DB_PASSWORD", reader_job)
             self.assertNotIn("secrets.MIGRATION_SUPABASE_DB_PASSWORD", reader_job)
+
+        probe = (ROOT / ".github/workflows/verify-production-db-writer-connection.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("workflow_dispatch:", probe)
+        self.assertIn("GITHUB_REF" , probe)
+        self.assertIn('refs/heads/main', probe)
+        self.assertIn("name: production-db-check", probe)
+        self.assertIn("name: production-db-apply", probe)
+        self.assertIn("scripts/check-writer-environment.py", probe)
+        self.assertIn("PROD_SUPABASE_POOLER_HOST", probe)
+        self.assertIn("PROD_SUPABASE_PROJECT_REF", probe)
+        self.assertIn("MIGRATION_SUPABASE_DB_PASSWORD", probe)
+        self.assertIn("scripts/verify-db-project-identity.py", probe)
+        self.assertIn("scripts/verify-production-writer-history.py", probe)
+        self.assertNotIn("check-migration-history.py --base-ref", probe)
+        self.assertIn("grep -Fxq 'result=PASS'", probe)
+        self.assertNotIn("PROD_DB_WRITER_ENABLED", probe)
+        self.assertNotIn("supabase db push", probe)
+        self.assertNotIn("supabase/setup-cli", probe)
+        self.assertNotIn("scripts/apply-pending-migrations.py", probe)
+        self.assertNotIn("SUPABASE_DB_URL", probe)
+        self.assertLess(probe.index("verify-reader:"), probe.index("verify-writer-environment:"))
+        self.assertLess(probe.index("verify-writer-environment:"), probe.index("verify-writer-credentials:"))
 
         writer_job = job_section("apply")
         self.assertIn(

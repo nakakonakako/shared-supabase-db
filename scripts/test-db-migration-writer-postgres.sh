@@ -134,7 +134,7 @@ export SUPABASE_DB_URL="$MIGRATION_WRITER_TEST_DATABASE_URL"
 apply_script="$repo_root/scripts/apply-pending-migrations.py"
 cli="$repo_root/node_modules/.bin/supabase"
 
-python3 "$apply_script" \
+DB_TARGET=dev python3 "$apply_script" \
   --repo "$fixture" \
   --migrations-dir "$fixture/supabase/migrations" \
   --workdir "$fixture" \
@@ -146,7 +146,7 @@ ALTER TABLE public.writer_probe ADD COLUMN label text;
 SQL
 write_manifest
 
-python3 "$apply_script" \
+DB_TARGET=dev python3 "$apply_script" \
   --repo "$fixture" \
   --migrations-dir "$fixture/supabase/migrations" \
   --workdir "$fixture" \
@@ -171,7 +171,7 @@ exit 99
 SH
 chmod 700 "$test_root/bin/should-not-run"
 export MIGRATION_WRITER_TEST_SENTINEL="$test_root/unexpected-cli-call"
-python3 "$apply_script" \
+DB_TARGET=dev python3 "$apply_script" \
   --repo "$fixture" \
   --migrations-dir "$fixture/supabase/migrations" \
   --workdir "$fixture" \
