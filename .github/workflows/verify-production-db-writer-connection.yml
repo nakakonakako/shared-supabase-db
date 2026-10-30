@@ -73,8 +73,8 @@ jobs:
           python3 scripts/validate-writer-db-env.py
       - name: Install PostgreSQL client
         run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
-      - name: Verify shared migration history IN_SYNC as Reader
-        run: python3 scripts/check-migration-history.py --base-ref "$GITHUB_SHA"
+      - name: Verify shared migration history as Reader
+        run: python3 scripts/verify-production-writer-history.py --base-ref "$GITHUB_SHA"
       - name: Verify Production DB identity marker as Reader
         run: python3 scripts/verify-db-project-identity.py
       - name: Verify Reader, RPC, AI quota, and ACL integrity

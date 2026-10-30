@@ -20,6 +20,7 @@ WORKFLOW_RESULT = ROOT / "scripts/evaluate-db-migration-workflow.py"
 IDENTITY_CHECK = ROOT / "scripts/verify-db-project-identity.py"
 DEV_WRITER_GATE = ROOT / "scripts/require-dev-writer-enabled.py"
 PROD_WRITER_GATE = ROOT / "scripts/require-production-writer-enabled.py"
+PROD_WRITER_HISTORY = ROOT / "scripts/verify-production-writer-history.py"
 
 
 class MigrationWriterTests(unittest.TestCase):
@@ -333,6 +334,65 @@ class MigrationWriterTests(unittest.TestCase):
                 result = check(value)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("Production Writer is disabled", result.stderr)
+
+    def test_production_writer_probe_history_allows_only_in_sync_and_valid_pending(self) -> None:
+        fake_psql = self.bin / "psql"
+        fake_psql.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "if os.environ.get('FAKE_PSQL_FAIL') == '1': sys.exit(2)\n"
+            "sys.stdout.write(os.environ.get('FAKE_REMOTE_HISTORY', ''))\n",
+            encoding="utf-8",
+        )
+        fake_psql.chmod(0o700)
+        cases = (
+            ("IN_SYNC", "20260101000000\n", 0, 0),
+            ("PENDING", "", 0, 0),
+            ("REMOTE_ONLY", "20260101000000\n20270101000000\n", 0, 2),
+            ("ERROR", "20270101000000\n", 0, 2),
+        )
+        for state, history, fail, expected in cases:
+            with self.subTest(state=state):
+                result = subprocess.run(
+                    [sys.executable, str(PROD_WRITER_HISTORY), "--base-ref", self.base_ref],
+                    cwd=self.repo,
+                    env={
+                        **self.env,
+                        "FAKE_REMOTE_HISTORY": history,
+                        "FAKE_PSQL_FAIL": str(fail),
+                    },
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                expected_log = f"Production Writer probe history: {state}"
+                self.assertIn(expected_log, result.stdout + result.stderr)
+
+        connection_failure = subprocess.run(
+            [sys.executable, str(PROD_WRITER_HISTORY), "--base-ref", self.base_ref],
+            cwd=self.repo,
+            env={**self.env, "FAKE_PSQL_FAIL": "1"},
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(connection_failure.returncode, 2)
+        self.assertIn("history: ERROR", connection_failure.stderr)
+
+        spec = __import__("importlib.util", fromlist=["spec_from_file_location"])
+        module_spec = spec.spec_from_file_location("production_writer_history", PROD_WRITER_HISTORY)
+        assert module_spec and module_spec.loader
+        module = spec.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        for state, exit_code in (("IN_SYNC", 0), ("PENDING", 1)):
+            self.assertTrue(module.is_allowed_result(state, exit_code))
+        for state, exit_code in (
+            ("IN_SYNC", 1),
+            ("PENDING", 0),
+            ("PENDING", 2),
+            ("REMOTE_ONLY", 1),
+            ("ERROR", 2),
+        ):
+            self.assertFalse(module.is_allowed_result(state, exit_code))
 
     def test_in_sync_skips_supabase_cli_and_remote_only_fails_closed(self) -> None:
         marker = self.root / "cli-invoked"
@@ -770,7 +830,8 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertIn("PROD_SUPABASE_PROJECT_REF", probe)
         self.assertIn("MIGRATION_SUPABASE_DB_PASSWORD", probe)
         self.assertIn("scripts/verify-db-project-identity.py", probe)
-        self.assertIn("scripts/check-migration-history.py", probe)
+        self.assertIn("scripts/verify-production-writer-history.py", probe)
+        self.assertNotIn("check-migration-history.py --base-ref", probe)
         self.assertIn("grep -Fxq 'result=PASS'", probe)
         self.assertNotIn("PROD_DB_WRITER_ENABLED", probe)
         self.assertNotIn("supabase db push", probe)
