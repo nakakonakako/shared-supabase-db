@@ -63,6 +63,14 @@ def main() -> int:
             print(f"migration apply: {state}; no migration was applied", file=sys.stderr)
             return 2
 
+    target = os.environ.get("DB_TARGET", "")
+    if target not in {"dev", "production"}:
+        print("migration apply: target is invalid; no migration was applied", file=sys.stderr)
+        return 2
+    if target == "production" and os.environ.get("PROD_DB_WRITER_ENABLED") != "true":
+        print("migration apply: Production Writer is disabled; no migration was applied", file=sys.stderr)
+        return 2
+
     database_url = os.environ.get("SUPABASE_DB_URL", "")
     if not database_url:
         print("migration apply: pending migrations require a configured writer connection", file=sys.stderr)
