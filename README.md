@@ -1,14 +1,15 @@
 # shared-supabase-db
 
-共有Supabaseデータベースのmigration正本と検証ツールを管理するリポジトリ。第1段階では正本と隔離検証を整備し、Supabaseプロジェクトへの管理操作は行わない。
+共有Supabaseデータベースのmigration正本、Reader検証、承認付きWriter運用を管理するリポジトリ。Dev/Prodのhosted DB確認と適用は、main限定の専用GitHub Actions workflowを通じて行う。
 
 ## 前提
 
 - `supabase/migrations/` はreceipt-managerから移した既存14本を保持
 - 適用済みmigrationは不変。変更ではなく、新しいmigrationの追加で変更を表現
-- Supabase CLIはローカル開発用。`db push`やlinked projectへの接続は使用しない
+- Supabase CLIをローカルからhosted projectへ実行しない。migration適用はsharedの保護されたWriter workflowだけを使う
 - PR CIは使い捨てPostgreSQLだけを使用し、Supabase認証情報を受け取らない
-- hosted DB接続はDev/Prod別Environmentを使う手動・読み取り専用workflowに限定。PR CIは接続しない
+- hosted DB接続はDev/Prod別Environmentを使う手動workflowに限定する。Reader checksとWriter identity probesはread-only、migration applyだけがWriter接続を行う
+- shared `supabase/migrations/` と`SHA256SUMS`が共有DB全体のinventory/history正本。アプリ側migration一覧はDB全体の履歴判定に使わない
 
 ## 開発
 
@@ -36,16 +37,19 @@ DB_CONTRACT_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/db_contract_t
 
 SQLテスト接続先はloopbackに限定され、テストごとの専用データベース名を要求する。AI quotaテストはfresh clusterを使う。テスト用URLをシェル履歴やログに残さないこと。
 
-## Dev/Prodのmigration履歴照合
+## Migration運用の入口
 
-照合は各環境の承認済み読み取り専用接続情報を使い、実行担当者が個別に行う。CIには接続情報を設定しない。migration適用やWriter権限はこの手順に含めない。
+通常の変更手順、Reader preflight、Writer enablement、Environment承認、Writer identity、Reader postflight、失敗時の復旧は[Migration Writer運用手順](docs/migration-writer-handoff.md)を参照する。hosted DBへの直接接続やローカル`supabase db push`は使わない。
 
-1. 対象環境の管理手順に従って読み取り専用のDB接続情報をシェル環境に設定する（`PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGSSLMODE`, `PGPASSWORD`）。値をコマンド引数やログに出さない。
-2. `psql -X -w -A -t -v ON_ERROR_STOP=1 -c 'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;'` で履歴を取得する。
-3. 出力をアクセス制限された一時ファイルに保存し、`python3 scripts/check-migration-history.py --remote-versions-file <一時ファイル>` を実行する。照合後に一時ファイルを削除する。
-4. `IN_SYNC`以外（`PENDING`、`REMOTE_ONLY`、接続失敗、形式エラー）は作業を止め、原因を調査する。両環境の結果を環境名・日時・commit SHAとともに変更記録へ残す。
+| 用途 | 手動workflow | 読み取り/書き込み | 判定と制約 |
+| --- | --- | --- | --- |
+| Dev migration計画 | `dev-migration-plan.yml` | Dev Reader only | shared inventory・identity・Reader権限・履歴を確認。連続prefixの`PENDING`は計画表示だけで適用しない |
+| Dev/Prod Writer資格情報確認 | `verify-dev-db-writer-connection.yml` / `verify-production-db-writer-connection.yml` | Reader preflight後にWriter identityをread-only照合 | Environment保護を確認。migration適用なし。Writer flagはfalseのまま実行可能 |
+| Dev/Prod migration apply | `apply-dev-db-migrations.yml` / `apply-production-db-migrations.yml` | Reader preflight → 承認付きWriter → Reader postflight | `IN_SYNC`はno-op。連続prefixの`PENDING`のみ対象。Dev/Prod各enable flagが厳密に`true`の場合だけ適用 |
+| Production DB check | `production-db-check.yml` | Production Reader only | history `IN_SYNC`、Reader/ACL/RPC/AI quota integrityを確認 |
+| アプリ本番deploy gate | receipt-manager / price-memo各`deploy.yml` | shared Production Reader | DB identity・shared history `IN_SYNC`・対象commitのアプリ契約を検証。適用しない |
 
-DevとProdは個別に照合し、両方の結果をレビューする。migration履歴照合はスキーマや権限の健全性検証を代替せず、DB更新を実行しない。
+DevとProdは独立して計画・承認・実行する。一方の履歴状態を他方へ流用しない。
 
 ## 本番DB読み取り専用検証ゲート
 
@@ -86,9 +90,11 @@ shared側から固定SHAの両契約を検証するには`.github/workflows/cons
 
 `supabase/migrations/SHA256SUMS` は移植時の14本のSHA-256を記録する。`npm run check:migrations` はファイル名・順序・内容ハッシュを検証し、CIは保護ブランチとの差分で既存ファイルの編集・削除・改名を拒否する。
 
-## 次段階への移行前に必要な設定
+## 現在の状態と未完了作業
 
-- GitHubのmainブランチ保護とこのCIの必須チェック設定
-- receipt-managerとprice-memoのmigration参照先・開発手順をshared-supabase-dbへ切り替える変更計画（各リポジトリで別途レビュー）
-- Dev/Prodの読み取り専用履歴照合に使う担当者向け接続方法とアクセス承認
-- 将来Writerを導入する場合の別途設計・承認。現段階ではworkflow、Environment、Secretsを設定しない
+- Dev/Prod Reader検証とWriter資格情報のread-only identity probeは成功済み。Dev passwordはローテーション済みで旧ローカルWriter passwordは削除済み
+- `DEV_DB_WRITER_ENABLED=false`、`PROD_DB_WRITER_ENABLED=false`。Dev migration historyは`IN_SYNC`
+- `development-db-apply`と`production-db-apply`はmain-only、Required reviewersあり、administrator bypass無効。これらのGitHub protection metadataは読み取り専用で確認済み
+- Dev/Prodのshared WriterによるPENDING migration実適用は未検証。Devの`IN_SYNC` workflow成功はno-opであり、適用能力の証拠にはならない
+- Prodへの実適用は別途の明示承認が必要。初回Dev/Prod applyも対象ごとの明示承認、enable flag切替、Environment reviewer承認、Reader postflightを必要とする
+- receipt-managerの旧Production Writer Secretは初回shared Production PENDING適用、Reader postflight、両アプリの互換性・本番配信成功、旧Writer参照経路の再監査後に別途承認して削除する。初回実適用前は削除しない

@@ -158,11 +158,11 @@ jobs:
           reader-username: migration_preflight_login.${{ vars.PROD_SUPABASE_PROJECT_REF }}
           reader-password: ${{ secrets.MIGRATION_READER_PASSWORD }}
 ```
-各アプリリポジトリで必要な手動Environment設定は、既存の`production-db-check`をmain限定にし、`MIGRATION_READER_PASSWORD`をEnvironment Secretとして、`PROD_SUPABASE_POOLER_HOST`と`PROD_SUPABASE_PROJECT_REF`をEnvironment Variableとして設定すること。project refは`fsrbddgyysssqzyullrc`。専用Reader LOGINは`migration_preflight_login.<project-ref>`、SSLは必須。Writer資格情報はこのactionに渡さない。本変更ではEnvironment/Secretを作成・変更せず、実接続も実行しない。runnerには`python3`、`git`、`psql`が必要。
+各アプリリポジトリでは`production-db-check`をmain限定にし、`MIGRATION_READER_PASSWORD`をEnvironment Secretとして、`PROD_SUPABASE_POOLER_HOST`と`PROD_SUPABASE_PROJECT_REF`をEnvironment Variableとして設定する。project refは`fsrbddgyysssqzyullrc`。専用Reader LOGINは`migration_preflight_login.<project-ref>`、SSLは必須。Writer資格情報はこのactionに渡さない。runnerには`python3`、`git`、`psql`が必要。
 
 契約revisionはactionが`${{ github.sha }}`のアプリリポジトリから直接取得するため、sharedに格納した初期固定契約SHAをデプロイ判定には使わない。shared action/検証ロジックを変更した場合は、変更をmainへマージ後に両アプリの`uses`をその新しい完全commit SHAへ更新する。新migration追加だけの場合はaction SHA更新は不要で、毎回実行時に最新shared mainのmigration inventoryを固定取得する。実行中にshared mainが変わった場合はfail-closedとなり再実行が必要。
 
-このゲートはmigration履歴が厳密に`IN_SYNC`の場合しか通さない。そのためexpand/contract中にshared migrationが未適用ならアプリdeployも停止する。将来PENDING migration適用を伴う順序が必要なら、別途Writer orchestrationと互換性状態遷移を設計する。このactionをmigration applyの代替として使用しない。
+このゲートはmigration履歴が厳密に`IN_SYNC`の場合しか通さない。そのためexpand/contract中にshared migrationが未適用ならアプリdeployも停止する。PENDING migrationは、shared-supabase-dbの手動・保護Writer workflowで別途適用し、Reader postflightが`IN_SYNC`になった後にアプリを配信する。このactionをmigration applyの代替として使用しない。両環境のWriterはread-only接続確認済みだが、Dev/ProdのPENDING migration実適用は未検証で、Writer enable flagはfalseのまま。
 
 ## 他のActions連携方式
 
