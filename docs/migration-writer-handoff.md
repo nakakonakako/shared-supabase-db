@@ -18,7 +18,7 @@
 
 両apply workflowは`workflow_dispatch`専用で、mainからのみ実行する。同じtargetのworkflowはshared repository内のconcurrencyで直列化する。PENDING時はReader preflight後にWriter Environmentの保護を検査し、apply jobがEnvironment承認を待つ。承認後にも最新main、target、history immutability、Writer identityを再確認する。apply後はReader接続でidentity、履歴`IN_SYNC`、Reader権限、両アプリ契約を検査し、ProdではRPC・AI quota・ACL integrityも検査する。
 
-receipt-managerの旧Production apply/bootstrap workflowと本番Writer Secret参照はmainから撤去済み。price-memoにもhosted DB Writer経路はない。アプリ側に残る`db:push`停止stub、local migrations、隔離PostgreSQLテストはhosted DB適用経路ではない。旧receipt-manager Production Writer Secretは未削除のまま保管されているため、workflowへの再参照や旧経路の復旧を行わない。
+receipt-managerの旧Production apply/bootstrap workflowと本番Writer Secret参照はmainから撤去済み。price-memoにもhosted DB Writer経路はない。アプリ側に残る`db:push`停止stub、local migrations、隔離PostgreSQLテストはhosted DB適用経路ではない。旧receipt-manager Production Writer Secretは未削除のまま保管されている。shared Production Writerの初回PENDING適用、Reader postflight、両アプリの互換性確認と本番配信成功、旧Writer参照経路がないことの再監査が完了するまでは削除しない。その後も別途承認を得て削除する。
 
 ## Environment保護と現在の状態
 
@@ -67,13 +67,13 @@ PENDINGを実適用する場合にだけ、変更対象とリスク、migration 
 2. 成功後は対象のWriter enable flagを`false`へ戻し、設定変更記録を残す。
 3. 新schemaを使うアプリ契約をshared側で固定してから、各アプリのdeploy Reader gateが対象commitの契約PASSとshared history `IN_SYNC`を確認できることを確認する。その後アプリを個別に配信する。アプリdeploy workflowからmigrationは適用しない。
 4. ProdはDevの適用・postflight・アプリ互換性確認後、Prod固有のReader preflightと別途の明示承認を経て同じ手順を繰り返す。Prod migration実適用は別途承認を必須とする。
+5. receipt-managerの旧Production Writer Secretは、初回shared Production PENDING適用とReader postflightが成功し、両アプリのDB互換性と本番配信成功を確認した後に、receipt-managerおよびsharedの全workflowに旧Writer参照経路がないことを再監査する。その結果をレビューして別途承認を得た後でのみ削除する。初回実適用前は削除しない。
 
 ## 失敗時の停止と復旧
 
-- **Reader preflight、identity、history、integrity、契約の失敗:** Writerへ進まず停止する。flagをfalseのままにし、Reader権限を場当たり的に追加しない。原因を該当検証で調査する。
-- **Environment保護不足、承認拒否、flag不正、Writer認証/identity失敗:** applyを開始しない。flagをfalseに保ち、Environment policyや資格情報を別途レビューしてからprobe/preflightをやり直す。credentialやtokenをログへ貼らない。
-- **Writer CLIが失敗または結果不明:** 自動再実行や旧Writerへの切替をしない。workflowのReader postflightとDev migration plan/Prod Reader history checkで適用済みversion、部分適用、DB identity、両アプリ契約を読み取り確認し、flagをfalseへ戻す。適用済みmigrationを編集・削除せず、DBの自動rollbackをしない。
-- **Reader postflight失敗:** アプリ配信を停止し、flagをfalseに戻す。Readerで状態と必要な診断を調べ、運用者レビュー後に承認済みforward migrationまたは互換アプリ版で復旧する。
+- **Reader preflight、Environment保護/承認、Writer認証/identity、CLI、postflightのいずれかが失敗、workflowがキャンセル、または結果不明:** 対象の`DEV_DB_WRITER_ENABLED`または`PROD_DB_WRITER_ENABLED`をfalseへ戻す。flag変更だけでは実行中jobを停止できないため、Actions run/jobの状態を確認し、稼働中なら終了または明示的なcancelを確認する。flagがfalseになったことだけを停止証拠とみなさない。
+- **実行状態とDB状態の確認:** runが終了したことと残存jobがないことを確認し、Reader接続でidentity、migration履歴、適用済みversion、部分適用、両アプリ契約を調べる。failure/cancel/unknown直後に再dispatchしない。原因とDB状態を特定し、復旧方針と再実行について別途レビュー・承認を得る。
+- **履歴・診断の異常:** `REMOTE_ONLY`、`ERROR`、部分適用、Reader postflight失敗ではアプリ配信を停止する。Reader権限を場当たり的に追加せず、適用済みmigrationを編集・削除せず、DBの自動rollbackもしない。運用者レビュー後に承認済みforward migrationまたは互換アプリ版で復旧する。
 - **復旧経路:** 旧receipt-manager Writer経路はmainから撤去済みであり、復旧のためにアプリ側Writerを再有効化しない。shared applyを使う場合も、状態の確認、対象flagの一時有効化、Environment承認を改めて行う。
 
 適用済みSQLを戻す前提で運用しない。DB password rotation、旧Production Writer Secretの削除、Environment/Secret/Variableの変更はmigration適用とは別の承認・変更作業とする。

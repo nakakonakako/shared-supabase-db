@@ -47,9 +47,8 @@ ProdはDev結果を根拠に自動適用せず、独立したReader preflight、
 
 ## 失敗時の復旧
 
-- Reader preflight/identity/history/contract failure、またはEnvironment承認拒否ではWriter適用へ進まない。flagはfalseのままにする。
-- Writer認証・identity失敗では再適用せず、資格情報値を表示せずに管理者がtargetとcredential設定を確認する。
-- Writer CLI失敗や結果不明では即時再実行しない。Reader postflightとDev migration planで適用済みversion、部分適用、契約、identityを読み取り確認する。
+- applyのReader preflight、Environment保護/承認、Writer認証/identity、CLI、postflightのいずれかが失敗・cancel・結果不明なら、`DEV_DB_WRITER_ENABLED=false`へ戻す。flag変更だけで実行中jobは停止しないため、Actions run/jobが終了したことも確認する。
+- workflowの実行状態とDev migration historyをReaderで確認し、適用済みversion、部分適用、契約、identityを特定する。原因調査前の再dispatchを禁止する。Writer認証・identity失敗時は資格情報値を表示せず、管理者がtargetとcredential設定を確認する。
 - migration SQLを編集・削除せず、自動rollbackもしない。必要な修復はレビュー済みforward migrationで行う。
 - 旧receipt-manager `db:push`は停止済み。復旧のために旧ローカルWriter credentialや経路を戻さない。
 

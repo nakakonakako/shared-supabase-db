@@ -97,4 +97,4 @@ shared側から固定SHAの両契約を検証するには`.github/workflows/cons
 - `development-db-apply`と`production-db-apply`はmain-only、Required reviewersあり、administrator bypass無効。これらのGitHub protection metadataは読み取り専用で確認済み
 - Dev/Prodのshared WriterによるPENDING migration実適用は未検証。Devの`IN_SYNC` workflow成功はno-opであり、適用能力の証拠にはならない
 - Prodへの実適用は別途の明示承認が必要。初回Dev/Prod applyも対象ごとの明示承認、enable flag切替、Environment reviewer承認、Reader postflightを必要とする
-- 旧receipt-manager Production Writer Secretは残存していても削除しない。receipt-managerとprice-memoのworkflowに旧apply経路がないことを定期確認する
+- receipt-managerの旧Production Writer Secretは初回shared Production PENDING適用、Reader postflight、両アプリの互換性・本番配信成功、旧Writer参照経路の再監査後に別途承認して削除する。初回実適用前は削除しない
