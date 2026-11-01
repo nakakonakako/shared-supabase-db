@@ -11,6 +11,7 @@
     "test:sql:ai-quota": "bash scripts/run-ai-quota-sql-tests.sh",
     "test:sql:data-deletion": "bash scripts/run-price-memo-data-deletion-sql-tests.sh",
     "test:sql:private-broadcast": "bash scripts/run-price-memo-private-broadcast-sql-tests.sh",
+    "test:sql:folder-reading-schema": "bash scripts/run-price-folder-reading-schema-sql-tests.sh",
     "test:sql:contract": "bash scripts/test-db-contract-postgres.sh",
     "test:sql:migration-reader": "bash scripts/test-migration-preflight-reader.sh",
     "test:sql:migration-writer": "bash scripts/test-db-migration-writer-postgres.sh",
