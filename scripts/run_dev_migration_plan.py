@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the shared migration-history checker and summarize a Dev read-only plan."""
+"""Run the shared migration-history checker and summarize a Reader-only plan."""
 
 from __future__ import annotations
 
@@ -48,12 +48,20 @@ def evaluate_history_result(
     return "ERROR", [], False
 
 
-def write_summary(path: Path | None, state: str, pending: list[str]) -> None:
+def write_summary(
+    path: Path | None,
+    state: str,
+    pending: list[str],
+    target: str = "dev",
+) -> None:
     if path is None:
         return
+    target_label = {"dev": "Dev", "production": "Production"}.get(target)
+    if target_label is None:
+        raise ValueError("unsupported migration plan target")
     lines = [
         f"- Migration history: **{state}**",
-        "- DB contract compatibility: not checked by this workflow; run the separate Dev consumer contract check",
+        f"- DB contract compatibility: not checked by this workflow; run the separate {target_label} consumer contract check",
     ]
     if state == "PENDING":
         lines.extend(["", "### Pending migration versions", "", *[f"- `{version}`" for version in pending]])
@@ -68,11 +76,12 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--base-ref", help="also validate migration immutability against this ref")
     parser.add_argument("--summary-file", type=Path, help="append a GitHub Actions job summary")
+    parser.add_argument("--target", choices=("dev", "production"), default="dev")
     args = parser.parse_args()
 
     checker = Path(__file__).with_name("check-migration-history.py")
     try:
-        with tempfile.TemporaryDirectory(prefix="dev-migration-plan-") as temp_dir:
+        with tempfile.TemporaryDirectory(prefix="migration-plan-") as temp_dir:
             state_file = Path(temp_dir) / "history-state"
             command = [
                 sys.executable,
@@ -114,7 +123,7 @@ def main() -> int:
         print("Migration history: ERROR; history result was unavailable or inconclusive", file=sys.stderr)
 
     try:
-        write_summary(args.summary_file, state, pending)
+        write_summary(args.summary_file, state, pending, args.target)
     except OSError:
         print("Migration plan summary could not be written", file=sys.stderr)
         return 1
