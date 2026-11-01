@@ -20,7 +20,7 @@ npm ci
 npm run check
 ```
 
-SQLテスト5系統は専用の新しいPostgreSQLクラスター上で実行する。ReaderテストはPostgreSQL 17コンテナを自動起動する。AI quotaテストはクラスター全体にロールを作るため、他のSQLテストともクラスターを分ける。
+SQLテスト6系統は専用の新しいPostgreSQLクラスター上で実行する。ReaderテストはPostgreSQL 17コンテナを自動起動する。AI quotaテストはクラスター全体にロールを作るため、他のSQLテストともクラスターを分ける。
 
 ```sh
 AI_QUOTA_TEST_ALLOW_DISPOSABLE_DB=YES \
@@ -31,6 +31,7 @@ PRICE_MEMO_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/price_memo_dat
 PRICE_MEMO_BROADCAST_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/price_memo_private_broadcast_test \
   npm run test:sql:private-broadcast
 npm run test:sql:migration-reader
+PRICE_FOLDER_READING_SCHEMA_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/price_folder_reading_schema_test npm run test:sql:folder-reading-schema
 DB_CONTRACT_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/db_contract_test \
   npm run test:sql:contract
 ```
