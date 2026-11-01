@@ -45,6 +45,7 @@ SQLテスト接続先はloopbackに限定され、テストごとの専用デー
 | 用途 | 手動workflow | 読み取り/書き込み | 判定と制約 |
 | --- | --- | --- | --- |
 | Dev migration計画 | `dev-migration-plan.yml` | Dev Reader only | shared inventory・identity・Reader権限・履歴を確認。連続prefixの`PENDING`は計画表示だけで適用しない |
+| Production migration計画 | `production-migration-plan.yml` | Production Reader only | shared inventory・identity・Reader権限・履歴を確認。`PENDING`のversionを表示し、適用しない |
 | Dev/Prod Writer資格情報確認 | `verify-dev-db-writer-connection.yml` / `verify-production-db-writer-connection.yml` | Reader preflight後にWriter identityをread-only照合 | Environment保護を確認。migration適用なし。Writer flagはfalseのまま実行可能 |
 | Dev/Prod migration apply | `apply-dev-db-migrations.yml` / `apply-production-db-migrations.yml` | Reader preflight → 承認付きWriter → Reader postflight | `IN_SYNC`はno-op。連続prefixの`PENDING`のみ対象。Dev/Prod各enable flagが厳密に`true`の場合だけ適用 |
 | Production DB check | `production-db-check.yml` | Production Reader only | history `IN_SYNC`、Reader/ACL/RPC/AI quota integrityを確認 |
