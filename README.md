@@ -38,6 +38,8 @@ DB_CONTRACT_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/db_contract_t
 
 SQLテスト接続先はloopbackに限定され、テストごとの専用データベース名を要求する。AI quotaテストはfresh clusterを使う。テスト用URLをシェル履歴やログに残さないこと。
 
+開発者向けOCRの日次制限・AIブレーカー例外の設計と管理は [運用手順](docs/ai-quota-developer-exception.md) を参照。
+
 ## Migration運用の入口
 
 通常の変更手順、Reader preflight、Writer enablement、Environment承認、Writer identity、Reader postflight、失敗時の復旧は[Migration Writer運用手順](docs/migration-writer-handoff.md)を参照する。hosted DBへの直接接続やローカル`supabase db push`は使わない。
