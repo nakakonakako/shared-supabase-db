@@ -250,7 +250,7 @@ class ProductionDbCheckTests(unittest.TestCase):
         self.assertIn("PGCONNECT_TIMEOUT: \"10\"", identity_step)
         self.assertIn("scripts/verify-db-project-identity.py", identity_step)
         self.assertLess(
-            workflow.index("Install PostgreSQL client"),
+            workflow.index("Verify PostgreSQL client"),
             workflow.index("Verify Prod database-side identity as Reader"),
         )
         self.assertLess(

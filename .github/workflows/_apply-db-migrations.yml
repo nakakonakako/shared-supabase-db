@@ -88,8 +88,8 @@ jobs:
           python3 scripts/verify-consumer-db-contracts.py --validate-only --contracts-dir "$RUNNER_TEMP/db-contracts"
       - name: Validate the dedicated Reader target
         run: python3 scripts/validate-writer-db-env.py
-      - name: Install PostgreSQL client
-        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify PostgreSQL client
+        run: python3 scripts/verify-psql-client.py
       - name: Verify database-side project identity as Reader
         env:
           DB_TARGET: ${{ inputs.target }}
@@ -200,8 +200,8 @@ jobs:
             --repo . \
             --base-ref "${GITHUB_SHA}^1" \
             --only-immutability
-      - name: Install PostgreSQL client
-        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify PostgreSQL client
+        run: python3 scripts/verify-psql-client.py
       - name: Set up Supabase CLI
         uses: supabase/setup-cli@v3
         with:
@@ -261,8 +261,8 @@ jobs:
           set -euo pipefail
           python3 scripts/verify-consumer-db-contracts.py --validate-only --contracts-dir "$RUNNER_TEMP/db-contracts"
           python3 scripts/validate-writer-db-env.py
-      - name: Install PostgreSQL client
-        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify PostgreSQL client
+        run: python3 scripts/verify-psql-client.py
       - name: Verify database-side project identity as Reader
         env:
           DB_TARGET: ${{ inputs.target }}
