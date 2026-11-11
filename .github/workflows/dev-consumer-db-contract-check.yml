@@ -69,8 +69,11 @@ jobs:
           PGSSLMODE: require
           PGCONNECT_TIMEOUT: "10"
         run: python3 scripts/validate-dev-db-contract-env.py
-      - name: Install PostgreSQL client
-        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify PostgreSQL client
+        env:
+          PGHOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
+          PGPORT: "5432"
+        run: python3 scripts/verify-psql-client.py
       - name: Verify minimum Dev Reader privileges
         env:
           PGHOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}

@@ -72,8 +72,8 @@ jobs:
           python3 scripts/assert-latest-main.py "$GITHUB_SHA"
           python3 scripts/validate-writer-db-env.py
 
-      - name: Install PostgreSQL client
-        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify PostgreSQL client
+        run: python3 scripts/verify-psql-client.py
 
       - name: Verify minimum Reader privileges
         run: |

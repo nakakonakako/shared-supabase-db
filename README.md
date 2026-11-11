@@ -38,6 +38,8 @@ DB_CONTRACT_TEST_DATABASE_URL=postgresql://postgres@127.0.0.1:5432/db_contract_t
 
 SQLテスト接続先はloopbackに限定され、テストごとの専用データベース名を要求する。AI quotaテストはfresh clusterを使う。テスト用URLをシェル履歴やログに残さないこと。
 
+手動Reader・Writer workflowではランナー搭載の`psql`を接続前に検査し、PostgreSQL 17または18のクライアントのみを許可する。対象DBはPostgreSQL 17で、古い16以前や未検証の19以降、コマンド欠落・版数不明では接続前に停止する。`apt-get`への自動フォールバックは行わない。GitHub Actionsの`ubuntu-latest`は更新されるため、PR CIで実ランナーのクライアント検査と隔離PostgreSQL 17のSQLテストを実施する。
+
 開発者向けOCRの日次制限・AIブレーカー例外の設計と管理は [運用手順](docs/ai-quota-developer-exception.md) を参照。
 
 ## Migration運用の入口

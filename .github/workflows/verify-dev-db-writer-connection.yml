@@ -69,8 +69,8 @@ jobs:
           set -euo pipefail
           python3 scripts/assert-latest-main.py "$GITHUB_SHA"
           python3 scripts/validate-dev-db-contract-env.py
-      - name: Install PostgreSQL client
-        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify PostgreSQL client
+        run: python3 scripts/verify-psql-client.py
       - name: Verify minimum Reader privileges
         run: |
           set -euo pipefail
@@ -135,7 +135,7 @@ jobs:
           set -euo pipefail
           python3 scripts/assert-latest-main.py "$GITHUB_SHA"
           python3 scripts/validate-writer-db-env.py
-      - name: Install PostgreSQL client
-        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+      - name: Verify PostgreSQL client
+        run: python3 scripts/verify-psql-client.py
       - name: Verify Writer authentication and database-side identity (read-only)
         run: python3 scripts/verify-db-project-identity.py
