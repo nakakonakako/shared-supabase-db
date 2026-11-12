@@ -1,0 +1,61 @@
+name: Diagnose Dev AI quota authentication (read-only)
+on:
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+concurrency:
+  group: shared-supabase-db-migration-apply-dev
+  cancel-in-progress: false
+jobs:
+  environment-check:
+    runs-on: ubuntu-latest
+    env:
+      DB_TARGET: dev
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require latest main and protected Environment
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/check-writer-environment.py
+  diagnose:
+    needs: environment-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: development-db-apply
+    env:
+      DB_TARGET: dev
+      DB_ENVIRONMENT: development-db-apply
+      DB_CONNECTION_ROLE: writer
+      DB_POOLER_HOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
+      DB_PROJECT_REF: ${{ vars.DEV_SUPABASE_PROJECT_REF }}
+      PGHOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
+      PGPORT: '5432'
+      PGDATABASE: postgres
+      PGUSER: postgres.${{ vars.DEV_SUPABASE_PROJECT_REF }}
+      PGPASSWORD: ${{ secrets.DEV_MIGRATION_SUPABASE_DB_PASSWORD }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: '10'
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Recheck latest main and protected Dev target
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/check-writer-environment.py
+          python3 scripts/validate-writer-db-env.py
+          python3 scripts/verify-psql-client.py
+      - name: Run staged read-only checks
+        env:
+          AI_QUOTA_ADMIN_PASSWORD: ${{ secrets.DEV_AI_QUOTA_ADMIN_PASSWORD }}
+        run: python3 scripts/diagnose-dev-ai-quota-auth.py
