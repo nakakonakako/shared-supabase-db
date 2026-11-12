@@ -234,3 +234,29 @@ jobs:
           PGHOST: 127.0.0.1
           PGPORT: '5432'
           PGDATABASE: ai_quota_test
+
+  sql-ai-quota-backend-password:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: bootstrap
+          POSTGRES_PASSWORD: bootstrap_test_password
+          POSTGRES_DB: ai_quota_test
+          POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bootstrap -d ai_quota_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify initial setup against disposable SCRAM PostgreSQL
+        run: python3 scripts/test-dev-ai-quota-backend-postgres.py
+        env:
+          AI_QUOTA_TEST_ALLOW_DISPOSABLE_DB: YES
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGDATABASE: ai_quota_test
