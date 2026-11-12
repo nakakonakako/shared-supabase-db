@@ -1,0 +1,56 @@
+name: Dev AI quota integrity (Reader only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment:
+      name: development-db-check
+    env:
+      DB_TARGET: dev
+      DEV_SUPABASE_POOLER_HOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
+      DEV_SUPABASE_PROJECT_REF: ${{ vars.DEV_SUPABASE_PROJECT_REF }}
+      DEV_MIGRATION_READER_PASSWORD: ${{ secrets.DEV_MIGRATION_READER_PASSWORD }}
+      PGHOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
+      PGPORT: '5432'
+      PGDATABASE: postgres
+      PGUSER: migration_preflight_login.${{ vars.DEV_SUPABASE_PROJECT_REF }}
+      PGPASSWORD: ${{ secrets.DEV_MIGRATION_READER_PASSWORD }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: '10'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require latest main and validate Dev Reader target
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then exit 1; fi
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/validate-dev-db-contract-env.py
+          python3 scripts/verify-psql-client.py
+      - name: Verify Reader privileges and target identity
+        run: |
+          set -euo pipefail
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_dev_db_contract_reader.sql >/dev/null
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_migration_preflight_reader.sql >/dev/null
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_migration_reader_bootstrap.sql >/dev/null
+          python3 scripts/verify-db-project-identity.py
+      - name: Verify migration history and AI quota integrity
+        run: |
+          set -euo pipefail
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/check-migrations.py
+          sha256sum --check supabase/migrations/SHA256SUMS
+          python3 scripts/check-migration-history.py --base-ref "${GITHUB_SHA}^1"
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_s1_06_ai_quota_integrity.sql
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_ai_quota_admin_integrity.sql
