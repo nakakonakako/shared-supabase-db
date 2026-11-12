@@ -45,9 +45,22 @@ Devの `ai_quota_backend` に既存パスワードが設定されているか、
 
 `pg_roles.rolpassword` は常にマスクされ、別の値による認証失敗も「未設定」と「別のパスワードが設定済み」を区別しない。既存パスワードを上書きせず自動で初期化できる方法は未確立。Supabase Hostedの `postgres` は非superuserであり、隔離PostgreSQLでは `pg_authid` の強いロックが非superuserで拒否され、superuserに昇格した場合だけ確認と初期設定が成功した。この隔離テストの成功はHostedの動作を示さない。Hostedでのカタログ参照やロックの権限は未確認であり、権限を拡大しない。承認済みのHosted DB状態確認経路については管理者に相談する。
 
-既存値を取得できない場合、既存利用者への影響を調べたうえで、既存パスワードを失効させ得る再設定を別途明示承認する必要がある。承認済みの既存管理者手順はreceipt-managerの `docs/spec-ai-quota-database.md` にある対話式 `\password ai_quota_backend` であり、権限や対象DBを確認してから実施する。実施可否と対象roleに対するWriterの `CREATEROLE`・`ADMIN OPTION` はHostedで未確認。初期設定とは断定せず、再設定として扱う。作業中の他の管理者との競合も運用上防ぐ必要がある。
+既存値を取得できない場合、既存利用者への影響を調べたうえで、既存パスワードを失効させ得る再設定を別途明示承認する必要がある。初期設定とは断定せず、再設定として扱う。
 
 **DBログ:** SCRAM verifierは機密情報であり、パスワード設定SQLのサーバー側SQL文・監査ログに残る可能性がある。変更前にDevのDBログ設定、閲覧・転送できる主体、保持期間と削除方針を承認済みの管理者が確認し、必要最小限のアクセスと適切な保持方針を確保する。設定・権限・保持方針が不明または不適切なら変更しない。GitHub ActionsのマスクはDB側ログを保護しない。
+
+
+### 明示的なDev backendパスワード再設定
+
+`Reset Dev AI quota backend password` はDevと `ai_quota_backend` のみを対象に、既存値の有無を判定せず、対象パスワードを再設定する。**成功すると以前のパスワードは新規認証に使えなくなる。** 既存の接続は即時切断されるとは限らず、Poolerの認証キャッシュによって新旧の挙動が一時的に一致しない可能性がある。対象はOCR、チャット、CSV列推定であり、古い設定のアプリは再接続時にAI利用が失敗する。古い値での繰り返し接続はPoolerの認証制限を招き得る。利用者やバックグラウンドジョブを把握・周知し、切替順と停止時間を計画する。リポジトリ検索で他端末や外部サービスの不存在は証明できない。
+
+環境確認と運用上の影響確認、DB変更、Secret登録、ローカル配置はそれぞれ別途承認が必要。PRの作成・マージではこれらは行わない。新しい値は専用Secret `DEV_AI_QUOTA_BACKEND_PASSWORD` に限り、WriterやAdmin、Prodの値を流用しない。Workflowは既存 `development-db-apply` のレビュー、最新main SHA、Dev project refとDB identity、Writerの `CREATEROLE` と対象ロールへの `ADMIN OPTION`、対象ロール属性を確認し、不一致なら変更前に停止する。非superuserでも両権限があればPostgreSQL 17上は変更可能だが、Hostedで対象roleへの現行 `ADMIN OPTION` は未確認。権限不足時は拡大せず停止する。パスワード以外のロール属性や権限は変更しない。
+
+1. [DBログ]の条件を確認し、既存利用者と切替手順を調査する。別のロール変更や管理操作と重ならないよう調整する。GitHub Environmentの保護設定や参照可能なSecretの管理者も確認する。
+2. パスワードマネージャで英数字・ピリオド・アンダースコア・ハイフンのみの32〜128文字のランダム値を一度生成して安全に保管し、承認後に同じ値をGitHubのDev Environment `DEV_AI_QUOTA_BACKEND_PASSWORD` に登録する。GitHubのSecret登録にはEnvironmentレビューがない。コマンド引数、チャット、ログに値を出さない。
+3. 承認後にmainからworkflowを手動起動し、確認欄へ `reset-dev-ai-quota-backend` を指定する。Environment承認時もDev、対象ロール、既存値の失効、利用者への影響を確認する。成功時は同一Secretでの別接続によるパスワード認証とDev identityも検証する。
+4. `password_update=not_attempted` は変更前の失敗、`unknown` は変更結果不明、`confirmed` は変更済みで認証検証が未完了の可能性を示す。失敗や接続断の後に自動で再設定を繰り返さない。特に `confirmed` 後の認証失敗は、Poolerのキャッシュによる一時失敗と他の接続・認証失敗を区別できず、旧値が有効という証拠ではない。原因を確認し、別途承認された `Verify Dev AI quota backend login (read-only)` で既存Secretを使い認証とidentityを確認する。Writer Secretは診断に渡さない。タイミングを変えた診断を大量に繰り返さない。
+5. ローカルの `.env.ai-quota` にはパスワードマネージャに保管した**同じ値**を安全なエディタで直接入力する。変更直後のPoolerキャッシュや既存接続を考慮し、利用者の切替と復旧を確認する。
 
 ローカル接続の準備は、対象のDev専用パスワードの利用が確認できた後、別途承認して行う。
 
