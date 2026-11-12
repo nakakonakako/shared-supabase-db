@@ -38,3 +38,11 @@ Devと本番それぞれ同じ順序で独立に行う。各DB変更、Secret登
 失敗したProvision workflowは再実行せず、Secretも変更しない。mainから `Verify Dev AI quota admin login (read-only)` を手動実行し、`development-db-apply` で承認する。既存 `DEV_AI_QUOTA_ADMIN_PASSWORD` と専用ログインだけを使い、Writer Secretは渡さない。DB identityを含む読取専用トランザクションを実行する。PASSはその時点でのSecretによるDev専用ログイン認証とidentityを示すが、例外設定や過去のALTERの実行履歴は示さない。認証エラーはSecret不一致、接続障害、Poolerの認証キャッシュなどを区別せず、パスワードが未変更だった証明にはならない。自動再試行せず調査する。`preview`、`set`、パスワード再設定には各々別途承認が必要。
 
 Provisionの診断は固定の `stage` と `password_update` のみ記録する。`not_attempted` はALTER送信前、`unknown` はALTER送信後に結果を確定できない状態、`confirmed` はALTER成功応答を受信した状態である。プロセス中断等で段階メッセージがない場合も結果不明として扱う。秘密、verifier、DBエラー本文は出力しない。接続失敗はPoolerの認証失敗とネットワーク障害を区別しない。
+
+## Dev認証の段階的診断
+
+`Diagnose Dev AI quota authentication (read-only)` はmainからの手動起動と `development-db-apply` の承認が必要。既存のDev Writer Secretと `DEV_AI_QUOTA_ADMIN_PASSWORD` を使い、DB・Secret・Writer flagは変更しない。接続先はDev専用Session Poolerで、Writer接続後と専用ログイン接続後はいずれも読み取り専用トランザクションだけを使う。identity不一致では後続検査を止める。
+
+結果は各段階の `PASS` / `FAIL` / `UNKNOWN` / `SKIP` と固定分類のみ。`secret_format` は32〜128文字の許可文字種に合うかだけを示し、値・一部・長さを表示しない。不一致は当時と同じSecretが使われていた場合、旧ProvisionがDB接続前に拒否した根拠になるが、その後の変更や過去の実行を推測しない。`libpq`、`writer_connection`、`db_identity`、`admin_role`、`password_state`、`admin_authentication`、`admin_identity` の順に記録する。資格情報取得権限がなければ `password_state: UNKNOWN` とする。許可されている場合も `pg_authid` でNULLか否かだけをDB側で判定し、パスワード検証情報を取得・表示しない。`pg_roles.rolpassword` は常にマスクされるため使わない。
+
+専用ログインの認証失敗はDBパスワード未設定を証明しない。Poolerのキャッシュ、Secret不一致、ネットワーク等はそれぞれ可能性がある。接続エラーは既知の種類を固定コードに分類し、元のエラーを出さない。Secret形式、ロール、password_stateを含む各結果を確認し、Writer接続障害・identity不一致なら停止して管理者が調査する。Secret形式不一致なら登録元で非公開に確認し、変更は別途承認する。パスワード未設定や認証失敗が確認された場合も、自動で再設定や再実行はせず、原因と回復手順をレビューして別途承認する。認証とidentityがPASSならProvisionを再実行せず、別途承認の `preview` へ進める。

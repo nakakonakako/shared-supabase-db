@@ -15,6 +15,9 @@ spec.loader.exec_module(mod)
 diag_spec = importlib.util.spec_from_file_location('login_check', ROOT / 'scripts/verify-ai-quota-admin-login.py')
 diag = importlib.util.module_from_spec(diag_spec)
 diag_spec.loader.exec_module(diag)
+deep_spec = importlib.util.spec_from_file_location('deep_diag', ROOT / 'scripts/diagnose-dev-ai-quota-auth.py')
+deep = importlib.util.module_from_spec(deep_spec)
+deep_spec.loader.exec_module(deep)
 
 if os.environ.get('AI_QUOTA_TEST_ALLOW_DISPOSABLE_DB') != 'YES' or os.environ.get('PGHOST') != '127.0.0.1' or os.environ.get('PGDATABASE') != 'ai_quota_test':
     raise SystemExit('Requires an explicitly opted-in dedicated loopback test cluster')
@@ -69,6 +72,25 @@ attempt(first, True)
 assert login(first) and not login(second)
 attempt(second, True)
 assert login(second) and not login(first)
+import contextlib
+import io
+os.environ.update(writer)
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    deep_result = deep.diagnose(second, 'ai_quota_admin_login')
+if deep_result != 0:
+    raise AssertionError(out.getvalue())
+assert 'writer_connection: PASS' in out.getvalue()
+assert 'admin_role: PASS' in out.getvalue()
+assert 'password_state: UNKNOWN (insufficient_catalog_privilege)' in out.getvalue()
+assert 'admin_authentication: PASS' in out.getvalue()
+assert second not in out.getvalue()
+os.environ.update(writer)
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    assert deep.diagnose(first, 'ai_quota_admin_login') != 0
+assert 'admin_authentication: FAIL (authentication)' in out.getvalue()
+assert first not in out.getvalue()
 os.environ.update(root, PGUSER='ai_quota_admin_login', PGPASSWORD=second)
 diag.verify('dev')
 os.environ['PGPASSWORD'] = first
