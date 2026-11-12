@@ -1,0 +1,114 @@
+name: Manage AI quota developer exception
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Target database
+        required: true
+        type: choice
+        options: [dev, production]
+      operation:
+        description: Preview, set, clear, or audit
+        required: true
+        type: choice
+        options: [preview, set, clear, audit]
+      user_id:
+        description: Canonical Supabase UUID for set; empty for preview/clear
+        required: false
+        type: string
+      expected_fingerprint:
+        description: Preview fingerprint (or none); empty for preview
+        required: false
+        type: string
+      audit_run_id:
+        description: Original run ID for audit; empty otherwise
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: shared-supabase-db-migration-apply-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    env:
+      DB_TARGET: ${{ inputs.target }}
+      ADMIN_OPERATION: ${{ inputs.operation }}
+      ADMIN_USER_ID: ${{ inputs.user_id }}
+      ADMIN_EXPECTED: ${{ inputs.expected_fingerprint }}
+      ADMIN_AUDIT_RUN_ID: ${{ inputs.audit_run_id }}
+      ADMIN_PREFLIGHT: '1'
+    steps:
+      - name: Checkout requested main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require latest main and validate proposed operation
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then exit 1; fi
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/manage-ai-quota-developer.py | tee -a "$GITHUB_STEP_SUMMARY"
+  verify-environment:
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      DB_TARGET: ${{ inputs.target }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require protected target Environment
+        run: python3 scripts/check-writer-environment.py
+  operate:
+    needs: [prepare, verify-environment]
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.target == 'dev' && 'development-db-apply' || 'production-db-apply' }}
+    env:
+      DB_TARGET: ${{ inputs.target }}
+      DB_ENVIRONMENT: ${{ inputs.target == 'dev' && 'development-db-apply' || 'production-db-apply' }}
+      DB_POOLER_HOST: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST) || (inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST) || '' }}
+      DB_PROJECT_REF: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF) || (inputs.target == 'production' && vars.PROD_SUPABASE_PROJECT_REF) || '' }}
+      PGHOST: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST) || (inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST) || '' }}
+      PGPORT: '5432'
+      PGDATABASE: postgres
+      PGUSER: ai_quota_admin_login.${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF) || (inputs.target == 'production' && vars.PROD_SUPABASE_PROJECT_REF) || '' }}
+      PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_AI_QUOTA_ADMIN_PASSWORD) || (inputs.target == 'production' && secrets.PROD_AI_QUOTA_ADMIN_PASSWORD) || '' }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: '10'
+      ADMIN_OPERATION: ${{ inputs.operation }}
+      ADMIN_USER_ID: ${{ inputs.user_id }}
+      ADMIN_EXPECTED: ${{ inputs.expected_fingerprint }}
+      ADMIN_AUDIT_RUN_ID: ${{ inputs.audit_run_id }}
+      ADMIN_PREFLIGHT: '0'
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Recheck latest main and Environment after approval
+        run: |
+          set -euo pipefail
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/check-writer-environment.py
+      - name: Verify PostgreSQL client
+        run: python3 scripts/verify-psql-client.py
+      - name: Run approved bounded operation
+        run: python3 scripts/manage-ai-quota-developer.py
