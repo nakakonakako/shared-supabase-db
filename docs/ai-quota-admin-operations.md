@@ -39,27 +39,25 @@ Devと本番それぞれ同じ順序で独立に行う。各DB変更、Secret登
 
 Provisionの診断は固定の `stage` と `password_update` のみ記録する。`not_attempted` はALTER送信前、`unknown` はALTER送信後に結果を確定できない状態、`confirmed` はALTER成功応答を受信した状態である。プロセス中断等で段階メッセージがない場合も結果不明として扱う。秘密、verifier、DBエラー本文は出力しない。接続失敗はPoolerの認証失敗とネットワーク障害を区別しない。
 
-## Devアプリ用backendログインの初期設定
+## Devアプリ用backendログインの接続準備
 
-この手順は `ai_quota_backend` 専用で、`ai_quota_admin_login` やWriterの資格情報をアプリに使わない。既存パスワードの管理場所が判明している場合はそれを使う。パスワードの有無は `pg_roles` では判定できず、Admin/Readerの成功もbackendログインの成功を示さない。
+Devの `ai_quota_backend` に既存パスワードが設定されているか、また保管場所は未確認。Admin用ログインやWriterの接続成功はbackend用パスワードの存在を示さない。既存のDev backend専用パスワードを安全に取得できる場合は、その値を使う。Writer、Admin、Prodの資格情報をアプリに流用しない。
 
-`Initialize Dev AI quota backend password` はDevのみ、mainの手動実行と既存 `development-db-apply` Environment承認が必要で、Writer接続を初期化操作に限って使用する。main SHA、Environment保護、接続先、DB identity、ロール属性、Writerの権限を確認し、`pg_authid` を短時間ロックした同一トランザクションで `rolpassword IS NULL` だけを照会する。既存パスワード、ロック不可、カタログ参照不可、不明状態では更新しない。ロックは他のロール更新を短時間待機させ得る。hosted SupabaseのWriterに必要な権限があるかは未検証で、不足時は停止し、権限追加や再設定を勝手に行わない。初期設定専用であり、ローテーションには使わない。ロール属性や権限は変更しない。
+`pg_roles.rolpassword` は常にマスクされ、別の値による認証失敗も「未設定」と「別のパスワードが設定済み」を区別しない。既存パスワードを上書きせず自動で初期化できる方法は未確立。Supabase Hostedの `postgres` は非superuserであり、隔離PostgreSQLでは `pg_authid` の強いロックが非superuserで拒否され、superuserに昇格した場合だけ確認と初期設定が成功した。この隔離テストの成功はHostedの動作を示さない。Hostedでのカタログ参照やロックの権限は未確認であり、権限を拡大しない。承認済みのHosted DB状態確認経路については管理者に相談する。
 
-実行には別途承認が必要。次は将来の運用手順であり、PRの作成・マージだけではSecret登録や実行を行わない。
+既存値を取得できない場合、既存利用者への影響を調べたうえで、既存パスワードを失効させ得る再設定を別途明示承認する必要がある。承認済みの既存管理者手順はreceipt-managerの `docs/spec-ai-quota-database.md` にある対話式 `\password ai_quota_backend` であり、権限や対象DBを確認してから実施する。実施可否と対象roleに対するWriterの `CREATEROLE`・`ADMIN OPTION` はHostedで未確認。初期設定とは断定せず、再設定として扱う。作業中の他の管理者との競合も運用上防ぐ必要がある。
 
-**DBログの事前確認:** SCRAM verifierは機密情報であり、サーバーのSQL文・監査ログに残る可能性がある。Devのログ設定、ログを閲覧・転送できる主体、保持期間と削除方針を、承認済みの管理者が確認し、必要最小限のアクセスと適切な保持方針を満たすことを確認してから実行する。設定・権限・保持方針が不明または不適切なら実行しない。GitHub ActionsのマスクやSecretはDB側ログを保護しない。
+**DBログ:** SCRAM verifierは機密情報であり、パスワード設定SQLのサーバー側SQL文・監査ログに残る可能性がある。変更前にDevのDBログ設定、閲覧・転送できる主体、保持期間と削除方針を承認済みの管理者が確認し、必要最小限のアクセスと適切な保持方針を確保する。設定・権限・保持方針が不明または不適切なら変更しない。GitHub ActionsのマスクはDB側ログを保護しない。
 
-1. 安全なパスワードマネージャで英数字・ピリオド・アンダースコア・ハイフンのみの32〜128文字のランダム値を一度生成し、Dev backend専用として保存する。WriterやAdmin、Prodの値を使わない。
-2. GitHubの `development-db-apply` Environmentに `DEV_AI_QUOTA_BACKEND_PASSWORD` として、保管した同じ値を登録する。Secret登録はEnvironmentレビューを発生させないため別途承認を要する。値をコマンド引数、ログ、チャットに書かない。
-3. mainから対象workflowを実行し、Devのみであることを確認してEnvironment承認する。専用Secretを使う別接続でパスワード認証とDB identityを検証する。失敗時は再実行せず、`stage` と `password_update` を確認する。`not_attempted` は変更前、`unknown` はコミット成否不明、`confirmed` は更新済みで認証確認が未完了の可能性を示す。結果不明時は承認済み管理者が安全な方法で状態を確認する。verifierを含む可能性のあるDBログは上記の方針で保護する。
-4. receipt-managerの `backend/.env.ai-quota` を所有者限定 `0600` で用意し、同じパスワードを安全なエディタで直接入力する。`AI_QUOTA_DB_HOST` はDev Session Pooler、`AI_QUOTA_DB_PORT=5432`、`AI_QUOTA_DB_NAME=postgres`、`AI_QUOTA_DB_USER=ai_quota_backend.irgahixsuvtopiwmtkku`、`AI_QUOTA_DB_PASSWORD` は保管した値、`AI_QUOTA_DB_SSLROOTCERT` はローカルで読めるCAの絶対パスとする。Git管理しない。`AI_QUOTA_ENV_FILE` で別の保護ファイルも指定できるが、通常のworktree setupはquotaファイルやCAを自動リンクしない。
-5. DevのSupabase DashboardからCA証明書を取得し、保護されたローカルディレクトリに配置する。接続先を再確認し、`psql` の対話式パスワード入力、`sslmode=verify-full`、実際のCAパスで `BEGIN TRANSACTION READ ONLY; SELECT current_user; COMMIT;` だけを実行する。パスワードをコマンド引数や `.pgpass` に記録しない。両方で同じ保管値を入力したことを確認する。手入力のpsql認証成功だけではdotenvに保存した値との一致までは証明できない。読み取り確認はOCRやquota RPCを呼ばない。
-6. receipt-managerを再起動し、quota設定不在のログが消えたことを確認する。設定後の別要因による接続失敗やOCR動作は別途検証する。
+ローカル接続の準備は、対象のDev専用パスワードの利用が確認できた後、別途承認して行う。
 
-手順5の接続確認例。CAの絶対パスだけ実際のDev用ファイルに置き換え、パスワードは表示されない対話プロンプトで入力する。エラー本文には接続情報が含まれる場合があるため共有・記録しない。
+1. receipt-managerの `backend/.env.ai-quota` を所有者限定 `0600` で用意し、Dev専用パスワードを安全なエディタで直接入力する。`AI_QUOTA_DB_HOST` はDev Session Pooler、`AI_QUOTA_DB_PORT=5432`、`AI_QUOTA_DB_NAME=postgres`、`AI_QUOTA_DB_USER=ai_quota_backend.irgahixsuvtopiwmtkku`、`AI_QUOTA_DB_PASSWORD` はDev backend専用の値、`AI_QUOTA_DB_SSLROOTCERT` はローカルで読めるCAの絶対パスとする。Git管理しない。`AI_QUOTA_ENV_FILE` で別の保護ファイルも指定できるが、通常のworktree setupはquotaファイルやCAを自動リンクしない。
+2. DevのSupabase DashboardでSession Poolerの接続先を再確認し、CA証明書を取得して保護されたローカルディレクトリに配置する。
+3. `psql` の対話式パスワード入力、`sslmode=verify-full`、実際のCAパスで読み取り専用の `BEGIN TRANSACTION READ ONLY; SELECT current_user; COMMIT;` だけを実行する。パスワードをコマンド引数や `.pgpass` に記録せず、エラー本文を共有・記録しない。出力の `current_user` が `ai_quota_backend` であることを確認する。手入力のpsql認証成功だけではdotenvに保存した値との一致までは証明できない。OCRやquota RPCは呼ばない。
+4. receipt-managerを再起動し、quota設定不在のログが消えたことを確認する。設定後の別要因による接続失敗やOCR動作は別途検証する。
+
+読み取り専用接続確認例。CAの絶対パスだけ実際のDev用ファイルに置き換え、パスワードは表示されない対話プロンプトで入力する。
 
 ```sh
 psql -X -W "host=aws-1-ap-northeast-1.pooler.supabase.com port=5432 dbname=postgres user=ai_quota_backend.irgahixsuvtopiwmtkku sslmode=verify-full sslrootcert=<Dev用CAの絶対パス>" -c 'BEGIN TRANSACTION READ ONLY; SELECT current_user; COMMIT;'
 ```
-
-出力の `current_user` が `ai_quota_backend` であることを確認する。CAの取得元とPoolerのホストは、実行時にもDevプロジェクトのSupabase Dashboardで確認する。
