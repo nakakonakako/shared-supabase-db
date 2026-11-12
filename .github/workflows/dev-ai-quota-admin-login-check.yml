@@ -1,0 +1,56 @@
+name: Verify Dev AI quota admin login (read-only)
+on:
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+concurrency:
+  group: shared-supabase-db-migration-apply-dev
+  cancel-in-progress: false
+jobs:
+  environment-check:
+    runs-on: ubuntu-latest
+    env:
+      DB_TARGET: dev
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require latest main and protected Environment
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/check-writer-environment.py
+  verify:
+    needs: environment-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: development-db-apply
+    env:
+      DB_TARGET: dev
+      DB_ENVIRONMENT: development-db-apply
+      DB_PROJECT_REF: ${{ vars.DEV_SUPABASE_PROJECT_REF }}
+      PGHOST: ${{ vars.DEV_SUPABASE_POOLER_HOST }}
+      PGPORT: '5432'
+      PGDATABASE: postgres
+      PGUSER: ai_quota_admin_login.${{ vars.DEV_SUPABASE_PROJECT_REF }}
+      PGPASSWORD: ${{ secrets.DEV_AI_QUOTA_ADMIN_PASSWORD }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: '10'
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Recheck latest main and Environment protection
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/check-writer-environment.py
+          python3 scripts/verify-psql-client.py
+      - name: Verify dedicated login and database identity read-only
+        run: python3 scripts/verify-ai-quota-admin-login.py
