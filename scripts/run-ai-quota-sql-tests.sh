@@ -146,4 +146,14 @@ bash supabase/tests/ai_quota/test_concurrent_claim.sh
 bash supabase/tests/ai_quota/test_developer_exception_concurrent.sh
 revoke_test_owner
 
+echo "Applying Gemini 3.8 Flash settings migration to disposable database..."
+psql "$AI_QUOTA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/migrations/20261123180000_ai_quota_gemini_3_8_flash_settings.sql
+psql "$AI_QUOTA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_s1_06_ai_quota_integrity.sql
+if [[ "$can_update" != "t" || "$can_execute" != "t" ]]; then
+  psql "$AI_QUOTA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/tests/ai_quota/enable_disposable_owner_access.sql
+  test_owner_granted=1
+fi
+psql "$AI_QUOTA_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/tests/ai_quota/test_gemini_settings.sql
+revoke_test_owner
+
 echo "All ai_quota SQL tests passed."
