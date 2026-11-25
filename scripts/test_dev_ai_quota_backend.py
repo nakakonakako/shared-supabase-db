@@ -1,4 +1,4 @@
-"""Fail-closed tests for the Dev-only backend reset and diagnosis."""
+"""Fail-closed tests for the Dev-only backend reset."""
 import importlib.util
 from pathlib import Path
 import sys
@@ -51,18 +51,14 @@ class BackendPasswordTests(unittest.TestCase):
                     mod.provision('dev', 'b' * 40, 'ignored')
             self.assertEqual(str(result.exception), expected)
 
-    def test_workflows_are_dev_only_protected_and_scoped(self):
+    def test_workflow_is_dev_only_protected_and_scoped(self):
         reset = (ROOT / '.github/workflows/dev-ai-quota-backend-password.yml').read_text()
-        diagnostic = (ROOT / '.github/workflows/dev-ai-quota-backend-login-check.yml').read_text()
-        for workflow in (reset, diagnostic):
-            for item in ('workflow_dispatch:', 'development-db-apply', 'shared-supabase-db-migration-apply-dev',
-                         'scripts/assert-latest-main.py', 'scripts/check-writer-environment.py', 'DEV_AI_QUOTA_BACKEND_PASSWORD'):
-                self.assertIn(item, workflow)
-            for item in ('PROD_', 'production-db-apply', 'inputs.target', '  push:'):
-                self.assertNotIn(item, workflow)
-        self.assertIn('reset-dev-ai-quota-backend', reset)
-        self.assertIn('scripts/validate-writer-db-env.py', reset)
-        self.assertNotIn('MIGRATION_SUPABASE_DB_PASSWORD', diagnostic)
+        for item in ('workflow_dispatch:', 'development-db-apply', 'shared-supabase-db-migration-apply-dev',
+                     'scripts/assert-latest-main.py', 'scripts/check-writer-environment.py', 'DEV_AI_QUOTA_BACKEND_PASSWORD',
+                     'reset-dev-ai-quota-backend', 'scripts/validate-writer-db-env.py'):
+            self.assertIn(item, reset)
+        for item in ('PROD_', 'production-db-apply', 'inputs.target', '  push:'):
+            self.assertNotIn(item, reset)
         script = (ROOT / 'scripts/reset-dev-ai-quota-backend.py').read_text()
         self.assertNotIn('pg_authid', script)
         self.assertNotIn('pg_catalog.pg_authid', script)

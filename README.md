@@ -8,7 +8,7 @@
 - 適用済みmigrationは不変。変更ではなく、新しいmigrationの追加で変更を表現
 - Supabase CLIをローカルからhosted projectへ実行しない。migration適用はsharedの保護されたWriter workflowだけを使う
 - PR CIは使い捨てPostgreSQLだけを使用し、Supabase認証情報を受け取らない
-- hosted DB接続はDev/Prod別Environmentを使う手動workflowに限定する。Reader checksとWriter identity probesはread-only、migration applyだけがWriter接続を行う
+- hosted DB接続はDev/Prod別Environmentを使う手動workflowに限定する。Reader checksはread-only。Writer接続はmigration applyとAI quotaのパスワード設定workflowだけが行う
 - shared `supabase/migrations/` と`SHA256SUMS`が共有DB全体のinventory/history正本。アプリ側migration一覧はDB全体の履歴判定に使わない
 
 ## 開発
@@ -50,7 +50,6 @@ SQLテスト接続先はloopbackに限定され、テストごとの専用デー
 | --- | --- | --- | --- |
 | Dev migration計画 | `dev-migration-plan.yml` | Dev Reader only | shared inventory・identity・Reader権限・履歴を確認。連続prefixの`PENDING`は計画表示だけで適用しない |
 | Production migration計画 | `production-migration-plan.yml` | Production Reader only | shared inventory・identity・Reader権限・履歴を確認。`PENDING`のversionを表示し、適用しない |
-| Dev/Prod Writer資格情報確認 | `verify-dev-db-writer-connection.yml` / `verify-production-db-writer-connection.yml` | Reader preflight後にWriter identityをread-only照合 | Environment保護を確認。migration適用なし。Writer flagはfalseのまま実行可能 |
 | Dev/Prod migration apply | `apply-dev-db-migrations.yml` / `apply-production-db-migrations.yml` | Reader preflight → 承認付きWriter → Reader postflight | `IN_SYNC`はno-op。連続prefixの`PENDING`のみ対象。Dev/Prod各enable flagが厳密に`true`の場合だけ適用 |
 | Production DB check | `production-db-check.yml` | Production Reader only | history `IN_SYNC`、Reader/ACL/RPC/AI quota integrityを確認 |
 | アプリ本番deploy gate | receipt-manager / price-memo各`deploy.yml` | shared Production Reader | DB identity・shared history `IN_SYNC`・対象commitのアプリ契約を検証。適用しない |

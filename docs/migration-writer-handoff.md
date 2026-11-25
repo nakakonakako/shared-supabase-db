@@ -8,8 +8,6 @@
 | --- | --- | --- | --- |
 | shared `dev-migration-plan.yml` | Devのinventory、identity、Reader権限、履歴確認 | Dev Reader | しない。`IN_SYNC`または連続prefixの`PENDING`を報告 |
 | shared `production-migration-plan.yml` | Prodのinventory、identity、Reader権限、履歴確認 | Prod Reader | しない。`IN_SYNC`または連続prefixの`PENDING` versionを報告 |
-| shared `verify-dev-db-writer-connection.yml` | Dev Writer資格情報・identity probe | Reader preflight後にWriter接続をread-only照合 | しない |
-| shared `verify-production-db-writer-connection.yml` | Prod Writer資格情報・identity probe | Reader preflight後にWriter接続をread-only照合 | しない |
 | shared `apply-dev-db-migrations.yml` | Devへの承認済み適用 | Reader preflight、保護EnvironmentのWriter、Reader postflight | Dev flagが`true`のPENDINGだけ |
 | shared `apply-production-db-migrations.yml` | Prodへの承認済み適用 | Reader preflight、保護EnvironmentのWriter、Reader postflight | Prod flagが`true`のPENDINGだけ |
 | shared `production-db-check.yml` | Production Readerの権限・history・integrity確認 | Production Reader | しない。history `IN_SYNC`が必須 |
@@ -46,10 +44,9 @@ receipt-managerの旧Production apply/bootstrap workflowと本番Writer Secret�
 
 ### 2. 対象環境のReader preflightを行う
 
-1. mainの最新commitを対象に、Devは`dev-migration-plan.yml`と`dev-consumer-db-contract-check.yml`、Prodは`production-migration-plan.yml`、`verify-production-db-writer-connection.yml`、`consumer-db-contract-check.yml`を手動実行する。Prod historyがすでに`IN_SYNC`なら`production-db-check.yml`も実行できる。workflow runは同じcommit SHAで記録する。
-2. migration planでDB identity、最小Reader権限、shared inventory/checksum、履歴を確認する。consumer contract checkで両アプリ契約を確認し、Prod Writer probeでRPC/AI quota/ACL integrityを含むReader検証とWriter identity結果を確認する。履歴planはmigration一覧を提示するだけで、Writer applyではない。
+1. mainの最新commitを対象に、Devは`dev-migration-plan.yml`と`dev-consumer-db-contract-check.yml`、Prodは`production-migration-plan.yml`と`consumer-db-contract-check.yml`を手動実行する。Prod historyがすでに`IN_SYNC`なら`production-db-check.yml`も実行できる。workflow runは同じcommit SHAで記録する。
+2. migration planでDB identity、最小Reader権限、shared inventory/checksum、履歴を確認する。consumer contract checkで両アプリ契約を確認する。RPC/AI quota/ACL integrityは`production-db-check.yml`とapply後のpostflightで確認し、Writer identityは承認後のapply jobが適用前に照合する。履歴planはmigration一覧を提示するだけで、Writer applyではない。
 3. apply候補がある場合はplan/checkerの`PENDING`一覧がshared migrationの連続prefixであることをレビューする。`REMOTE_ONLY`、`ERROR`、診断不一致、契約不一致、接続失敗は停止し、flagを変更しない。
-4. Prod Writer credential probeはWriter flagがfalseでも実行できるread-only検査であり、apply承認の代替ではない。
 
 ### 3. Writerを対象環境だけで一時有効化する
 
