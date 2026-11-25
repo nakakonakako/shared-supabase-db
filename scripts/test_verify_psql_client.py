@@ -11,11 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VERIFY = ROOT / "scripts/verify-psql-client.py"
 WORKFLOWS = {
-    "dev-migration-plan.yml": 1,
-    "production-migration-plan.yml": 1,
-    "dev-consumer-db-contract-check.yml": 1,
-    "consumer-db-contract-check.yml": 1,
-    "production-db-check.yml": 1,
+    "db-check.yml": 1,
     "_apply-db-migrations.yml": 3,
 }
 
@@ -79,15 +75,6 @@ class VerifyPsqlClientTests(unittest.TestCase):
         for file in workflow_dir.glob("*.yml"):
             if file.name != "pr-ci.yml":
                 self.assertNotIn("apt-get install -y -qq postgresql-client", file.read_text(encoding="utf-8"))
-        for name, prefix in (
-            ("consumer-db-contract-check.yml", "PROD"),
-            ("dev-consumer-db-contract-check.yml", "DEV"),
-            ("production-db-check.yml", "PROD"),
-        ):
-            text = (workflow_dir / name).read_text(encoding="utf-8")
-            verify_step = text.split("- name: Verify PostgreSQL client", 1)[1].split("- name:", 1)[0]
-            self.assertIn(f"PGHOST: ${{{{ vars.{prefix}_SUPABASE_POOLER_HOST }}}}", verify_step)
-            self.assertIn('PGPORT: "5432"', verify_step)
         ci = (workflow_dir / "pr-ci.yml").read_text(encoding="utf-8")
         self.assertLess(ci.index("python3 scripts/verify-psql-client.py"), ci.index("npm run test:sql:ai-quota"))
 

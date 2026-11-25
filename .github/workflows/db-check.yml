@@ -1,0 +1,158 @@
+name: DB check (Reader only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Target database
+        required: true
+        type: choice
+        options: [dev, production]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-supabase-db-check-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  require-latest-main:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require manual dispatch from main
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch || "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "DB checks can only be dispatched manually from main." >&2
+            exit 1
+          fi
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require the latest main commit
+        run: python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+
+  check:
+    needs: require-latest-main
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.target == 'dev' && 'development-db-check' || 'production-db-check' }}
+    env:
+      DB_TARGET: ${{ inputs.target }}
+      DB_ENVIRONMENT: ${{ inputs.target == 'dev' && 'development-db-check' || 'production-db-check' }}
+      DB_POOLER_HOST: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST) || (inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST) || '' }}
+      DB_PROJECT_REF: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF) || (inputs.target == 'production' && vars.PROD_SUPABASE_PROJECT_REF) || '' }}
+      DB_CONNECTION_ROLE: reader
+      PGHOST: ${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_POOLER_HOST) || (inputs.target == 'production' && vars.PROD_SUPABASE_POOLER_HOST) || '' }}
+      PGPORT: "5432"
+      PGDATABASE: postgres
+      PGUSER: migration_preflight_login.${{ (inputs.target == 'dev' && vars.DEV_SUPABASE_PROJECT_REF) || (inputs.target == 'production' && vars.PROD_SUPABASE_PROJECT_REF) || '' }}
+      PGSSLMODE: require
+      PGCONNECT_TIMEOUT: "10"
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Recheck latest main after the Environment is assigned
+        run: python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+      - name: Validate migration immutability and checksums before DB access
+        run: |
+          set -euo pipefail
+          python3 scripts/check-migration-history.py \
+            --migrations-dir supabase/migrations \
+            --repo . \
+            --base-ref "${GITHUB_SHA}^1" \
+            --only-immutability
+          python3 scripts/check-migrations.py
+          sha256sum --check supabase/migrations/SHA256SUMS
+          {
+            echo "## DB check: $DB_TARGET"
+            echo
+            echo '- Migration inventory validation: PASS (filenames and SHA256SUMS)'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Fetch and validate both pinned contracts before DB access
+        run: python3 scripts/verify-consumer-db-contracts.py --validate-only --contracts-dir "$RUNNER_TEMP/db-contracts"
+      - name: Verify PostgreSQL client
+        run: python3 scripts/verify-psql-client.py
+      - name: Validate the dedicated Reader target
+        env:
+          PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_READER_PASSWORD) || '' }}
+        run: python3 scripts/validate-writer-db-env.py
+      - name: Verify minimum Reader privileges
+        env:
+          PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_READER_PASSWORD) || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$DB_TARGET" == dev ]]; then
+            reader=verify_dev_db_contract_reader.sql
+          else
+            reader=verify_production_db_reader.sql
+          fi
+          for diagnostic in "$reader" verify_migration_preflight_reader.sql verify_migration_reader_bootstrap.sql; do
+            psql -X -w -v ON_ERROR_STOP=1 -f "supabase/diagnostics/$diagnostic" >/dev/null
+          done
+      - name: Verify database-side project identity as Reader
+        env:
+          PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_READER_PASSWORD) || '' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-db-project-identity.py
+          {
+            echo '- DB identity verification: PASS'
+            echo '- Reader privilege verification: PASS'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Classify shared migration history without applying migrations
+        id: history
+        env:
+          PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_READER_PASSWORD) || '' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/assert-latest-main.py "$GITHUB_SHA"
+          python3 scripts/run_dev_migration_plan.py \
+            --migrations-dir supabase/migrations \
+            --repo . \
+            --base-ref "${GITHUB_SHA}^1" \
+            --target "$DB_TARGET" \
+            --summary-file "$GITHUB_STEP_SUMMARY" \
+            --state-output "$GITHUB_OUTPUT"
+      - name: Verify both pinned app contracts as the read-only Reader
+        env:
+          PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_READER_PASSWORD) || '' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-consumer-db-contracts.py --contracts-dir "$RUNNER_TEMP/db-contracts"
+          echo '- Pinned app contract verification: PASS' >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify Production integrity
+        if: inputs.target == 'production' && steps.history.outputs.state == 'IN_SYNC'
+        env:
+          PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_READER_PASSWORD) || '' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/verify-production-db-integrity.py \
+            --output "$RUNNER_TEMP/production-db-integrity.out"
+          grep -Fxq 'result=PASS' "$RUNNER_TEMP/production-db-integrity.out"
+          echo '- Reader, bootstrap, RPC, AI quota, and ACL integrity: PASS' >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify Dev AI quota integrity
+        if: inputs.target == 'dev' && steps.history.outputs.state == 'IN_SYNC'
+        env:
+          PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_READER_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_READER_PASSWORD) || '' }}
+        run: |
+          set -euo pipefail
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_s1_06_ai_quota_integrity.sql
+          psql -X -w -v ON_ERROR_STOP=1 -f supabase/diagnostics/verify_ai_quota_admin_integrity.sql
+          echo '- AI quota integrity: PASS' >> "$GITHUB_STEP_SUMMARY"
+      - name: Report skipped integrity checks
+        if: steps.history.outputs.state != 'IN_SYNC'
+        run: echo '- Integrity checks were skipped because migration history is not IN_SYNC' >> "$GITHUB_STEP_SUMMARY"

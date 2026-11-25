@@ -182,22 +182,5 @@ subprocess.run = _fake_run
         with self.assertRaises(ContractError):
             validate_contract(invalid)
 
-    def test_production_workflow_is_manual_main_only_and_reads_existing_environment(self) -> None:
-        workflow = (ROOT / ".github/workflows/consumer-db-contract-check.yml").read_text()
-        self.assertIn("workflow_dispatch:", workflow)
-        self.assertNotIn("pull_request:", workflow)
-        self.assertNotIn("push:", workflow)
-        self.assertIn("permissions:\n  contents: read", workflow)
-        self.assertIn("name: production-db-check", workflow)
-        self.assertIn("scripts/assert-latest-main.py", workflow)
-        self.assertIn("scripts/verify-consumer-db-contracts.py --validate-only", workflow)
-        self.assertIn("scripts/verify-consumer-db-contracts.py --contracts-dir", workflow)
-        self.assertLess(
-            workflow.index("Fetch and validate both pinned contracts before DB access"),
-            workflow.index("PGPASSWORD: ${{ secrets.MIGRATION_READER_PASSWORD }}"),
-        )
-        self.assertNotIn("contents: write", workflow)
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 # Dev DB契約検証の事前設定
 
-`.github/workflows/dev-consumer-db-contract-check.yml`は既存migrationが作る`migration_preflight_reader`グループと、専用LOGINを使う。WorkflowやPR CIはReader LOGIN、Environment設定、Secretを作成・変更しない。Devへの接続やDB変更も行わない。このEnvironmentは手動実行前に人が作成・設定する。未設定の変数やSecretは接続前の検証で拒否される。
+`.github/workflows/db-check.yml`を`target=dev`で実行する場合は既存migrationが作る`migration_preflight_reader`グループと、専用LOGINを使う。WorkflowやPR CIはReader LOGIN、Environment設定、Secretを作成・変更しない。Devへの接続やDB変更も行わない。このEnvironmentは手動実行前に人が作成・設定する。未設定の変数やSecretは接続前の検証で拒否される。
 
 ## GitHub Environment
 
@@ -12,7 +12,7 @@
 | Environment Variable | `DEV_SUPABASE_PROJECT_REF` | 同じDev Supabase project ref |
 | Environment Secret | `DEV_MIGRATION_READER_PASSWORD` | Devプロジェクトの`migration_preflight_login`専用パスワード |
 
-Environmentと値は人が別途確認して設定する。このworkflowはProd変数・Secretへfallbackせず、Dev接続変数とPG接続値の不一致、Prod名の変数/Secretの混入、欠落値を接続前に拒否する。手動実行前にhostとproject refをDev Supabase Dashboardで照合し、Prodのhost/refを誤って登録していないことを確認する。Secret値は表示・ログ出力しない。
+Environmentと値は人が別途確認して設定する。このworkflowはProd変数・Secretへfallbackせず、固定したDev project refとの不一致、Dev接続変数とPG接続値の不一致、欠落値を接続前に拒否する。手動実行前にhostとproject refをDev Supabase Dashboardで照合し、Prodのhost/refを誤って登録していないことを確認する。Secret値は表示・ログ出力しない。
 
 ## Reader LOGIN
 
@@ -43,4 +43,4 @@ LOGIN作成後、承認済みのsecure `psql` sessionで`\password migration_pre
 
 PR CIは使い捨てPostgreSQLだけを使用し、Dev/Prodに接続しない。PRがmainへマージされた後、EnvironmentとDev Reader LOGINの準備が完了したことを別途レビューし、Actions画面で`main`を選択してworkflowを手動実行する。実行前にGitHub Environmentのmain制限、Dev host/ref、Dev専用Secretの所有者、Dev/Prod project refの相違を再確認する。
 
-Workflowは両アプリの契約を固定commit SHAから取得し、DB接続前に形式を検証する。catalog照合は契約ごとにread-only transactionで行い、migration履歴照合やmigration適用は行わない。
+Workflowは両アプリの契約を固定commit SHAから取得し、DB接続前に形式を検証する。catalog照合は契約ごとにread-only transactionで行う。migration履歴は分類して表示するだけで、適用は行わない。

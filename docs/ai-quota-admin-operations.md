@@ -13,7 +13,7 @@
 ## Dev 検証から本番への手順
 
 1. Dev migration plan、別途承認された migration 適用・Reader postflight を実施し、専用資格情報を別途承認して設定する。migration の事前条件や適用成否は hosted 環境で未検証である。失敗時は中止し調査する。
-2. main から `Dev AI quota integrity (Reader only)` を手動実行する。Dev Reader とDB marker・migration履歴・quota/管理権限を読み取り専用で確認する。既存の破壊的な隔離SQLテストは hosted DB では実行しない。このチェックは設定値や実際のOCR動作を確認しない。
+2. main から `DB check (Reader only)` を `target=dev` で手動実行する。Dev Reader とDB marker・migration履歴・両アプリ契約を読み取り専用で確認し、履歴が`IN_SYNC`ならquota/管理権限も確認する。job summaryで`IN_SYNC`と`AI quota integrity: PASS`を確認する。既存の破壊的な隔離SQLテストは hosted DB では実行しない。このチェックは設定値や実際のOCR動作を確認しない。
 3. `Manage AI quota developer exception` を Dev で `set` にして対象UUIDを指定し、承認する（承認は1回）。`expected_fingerprint` は空でよい。更新は行ロック・事前値照合・アカウント確認・更新後確認・監査記録を同一トランザクションで行う。コミット後、同じjobが当該runの監査記録と現在値を照合し、結果をjob summaryに出す。`verified:` が出れば追加の `preview` / `audit` は不要。実際のOCR動作はDevで確認する。解除は `clear` を同様に実行する。確認済みの値からの変更に限定したい場合だけ、先に `preview` を実行してその指紋を `expected_fingerprint` に指定する（承認は2回になる）。
 4. Dev の結果をレビュー後、本番の migration plan、別途承認された適用・Reader postflight、専用資格情報設定を実施する。対象本番アカウントを独立に確認し、本番の `set` を承認する。両環境の UUID が同一とは仮定しない。
 5. GitHub Actions の実行履歴とDB監査記録を照合する。`audit` に元の run ID を指定すると操作・actor・前後指紋を参照できる。DB記録と更新は原子的だが、actor/run ID は専用資格情報を使うクライアントから渡されるため、GitHub実行履歴との照合が必要。資格情報を持つ管理者からの偽装やDB管理者による改変に対する改ざん防止ログではない。
