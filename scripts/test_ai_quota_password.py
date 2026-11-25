@@ -62,15 +62,6 @@ class PasswordTests(unittest.TestCase):
                 mod.provision('dev', 'a' * 40, 'ignored')
         self.assertEqual(str(result.exception), 'stage=admin_authentication; password_update=confirmed')
 
-    def test_diagnostic_is_dev_only_and_secret_scoped(self):
-        workflow = (ROOT / '.github/workflows/dev-ai-quota-admin-login-check.yml').read_text()
-        self.assertIn('secrets.DEV_AI_QUOTA_ADMIN_PASSWORD', workflow)
-        self.assertIn('development-db-apply', workflow)
-        self.assertIn('scripts/check-writer-environment.py', workflow)
-        self.assertNotIn('MIGRATION_SUPABASE_DB_PASSWORD', workflow)
-        self.assertNotIn('PROD_', workflow)
-        self.assertNotIn('  push:', workflow)
-
     def test_workflow_requires_main_protection_and_scoped_secrets(self):
         workflow = (ROOT / '.github/workflows/ai-quota-admin-password.yml').read_text()
         for item in ('workflow_dispatch:', 'refs/heads/main', 'scripts/assert-latest-main.py',

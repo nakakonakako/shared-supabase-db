@@ -27,15 +27,15 @@ Devと本番それぞれ同じ順序で独立に行う。各DB変更、Secret登
 1. 対象環境のReader migration planを確認し、別途承認された既存Writer applyとReader postflightを完了し、Writer flagをfalseに戻す。失敗・不明・identity不一致なら停止する。
 2. 対象の既存apply Environmentに、その環境専用の新しいSecretを安全に登録する。Secretの登録自体はEnvironmentレビューを発生させないため、事前に別途承認を得る。値は安全な管理経路で発行し、ログ・入力欄・シェル履歴に記録しない。
 3. `Provision AI quota admin password` をmainから対象を選び手動実行し、対象Environmentで承認する。workflowは最新main、Environment保護、Writer接続設定、同一接続でDB markerとpostgresのCREATEROLE・対象roleへのADMIN OPTION・対象role属性を検査する。libpqの `PQencryptPasswordConn` でSCRAM verifierを生成し、平文ではなくverifierを `ALTER ROLE` に渡す。DBログにverifierが残る可能性があり、verifierも機密としてDBログのアクセスを制限する。管理ロールや権限は追加しない。superuser以外には両権限が必要。新migrationでのロール作成者へのADMIN OPTIONはPostgreSQL 17の通常動作だが、hosted上では未確認であり、権限不足なら変更前に停止する。
-4. 同じworkflowが専用ログインによる別接続でパスワード認証とDB identityを確認する。失敗やタイムアウトは更新済みか不明として扱い、再試行しない。Devでは承認付き `Verify Dev AI quota admin login (read-only)` で既存Secretによる認証とidentityを一度確認する。この診断は設定内容を読まない。失敗時はSecretと対象環境、実行履歴を管理者が確認する。復旧の再設定には新たな承認が必要。以前のSecretを上書きした場合、以前の接続は使えなくなる可能性がある。
+4. 同じworkflowが専用ログインによる別接続でパスワード認証とDB identityを確認する。失敗やタイムアウトは更新済みか不明として扱い、再試行しない。失敗時はSecretと対象環境、実行履歴を管理者が確認する。復旧の再設定には新たな承認が必要。以前のSecretを上書きした場合、以前の接続は使えなくなる可能性がある。
 5. 対象アカウントとpreview指紋を確認し、`set`を手動実行・Environment承認する。続いて別の承認付き `preview` で指紋を照合し、対象環境のOCR動作を確認する。各段階で不一致・エラー・結果不明なら停止し、auditとpreviewで確認する。
 
 パスワード再設定は手順2〜4を再度行う。Dev完了後に本番も別途計画・承認し、同じ順序を繰り返す。workflowは失敗時にDBエラー本文や資格情報を表示しない。再設定時は一時的にアカウント管理workflowが使えなくなる可能性がある。対象アカウントのOCR例外はパスワード変更では切り替わらない。
 
 
-## Devで初期設定結果が不明な場合
+## 初期設定結果が不明な場合
 
-失敗したProvision workflowは再実行せず、Secretも変更しない。mainから `Verify Dev AI quota admin login (read-only)` を手動実行し、`development-db-apply` で承認する。既存 `DEV_AI_QUOTA_ADMIN_PASSWORD` と専用ログインだけを使い、Writer Secretは渡さない。DB identityを含む読取専用トランザクションを実行する。PASSはその時点でのSecretによるDev専用ログイン認証とidentityを示すが、例外設定や過去のALTERの実行履歴は示さない。認証エラーはSecret不一致、接続障害、Poolerの認証キャッシュなどを区別せず、パスワードが未変更だった証明にはならない。自動再試行せず調査する。`preview`、`set`、パスワード再設定には各々別途承認が必要。
+失敗したProvision workflowは自動で再実行せず、Secretと対象環境、実行履歴を調査する。`password_update=not_attempted`は変更前の停止であり、原因を直して再承認のうえ再実行できる。`unknown`または`confirmed`の後の失敗は、パスワードが変更済みの可能性がある。再実行は別途承認する。認証エラーはSecret不一致、接続障害、Poolerの認証キャッシュを区別せず、未変更の証明にはならない。
 
 Provisionの診断は固定の `stage` と `password_update` のみ記録する。`not_attempted` はALTER送信前、`unknown` はALTER送信後に結果を確定できない状態、`confirmed` はALTER成功応答を受信した状態である。プロセス中断等で段階メッセージがない場合も結果不明として扱う。秘密、verifier、DBエラー本文は出力しない。接続失敗はPoolerの認証失敗とネットワーク障害を区別しない。
 
@@ -59,7 +59,7 @@ Devの `ai_quota_backend` に既存パスワードが設定されているか、
 1. [DBログ]の条件を確認し、既存利用者と切替手順を調査する。別のロール変更や管理操作と重ならないよう調整する。GitHub Environmentの保護設定や参照可能なSecretの管理者も確認する。
 2. パスワードマネージャで英数字・ピリオド・アンダースコア・ハイフンのみの32〜128文字のランダム値を一度生成して安全に保管し、承認後に同じ値をGitHubのDev Environment `DEV_AI_QUOTA_BACKEND_PASSWORD` に登録する。GitHubのSecret登録にはEnvironmentレビューがない。コマンド引数、チャット、ログに値を出さない。
 3. 承認後にmainからworkflowを手動起動し、確認欄へ `reset-dev-ai-quota-backend` を指定する。Environment承認時もDev、対象ロール、既存値の失効、利用者への影響を確認する。成功時は同一Secretでの別接続によるパスワード認証とDev identityも検証する。
-4. `password_update=not_attempted` は変更前の失敗、`unknown` は変更結果不明、`confirmed` は変更済みで認証検証が未完了の可能性を示す。失敗や接続断の後に自動で再設定を繰り返さない。特に `confirmed` 後の認証失敗は、Poolerのキャッシュによる一時失敗と他の接続・認証失敗を区別できず、旧値が有効という証拠ではない。原因を確認し、別途承認された `Verify Dev AI quota backend login (read-only)` で既存Secretを使い認証とidentityを確認する。Writer Secretは診断に渡さない。タイミングを変えた診断を大量に繰り返さない。
+4. `password_update=not_attempted` は変更前の失敗、`unknown` は変更結果不明、`confirmed` は変更済みで認証検証が未完了の可能性を示す。失敗や接続断の後に自動で再設定を繰り返さない。特に `confirmed` 後の認証失敗は、Poolerのキャッシュによる一時失敗と他の接続・認証失敗を区別できず、旧値が有効という証拠ではない。原因を確認し、再設定が必要な場合は改めて承認する。
 5. ローカルの `.env.ai-quota` にはパスワードマネージャに保管した**同じ値**を安全なエディタで直接入力する。変更直後のPoolerキャッシュや既存接続を考慮し、利用者の切替と復旧を確認する。
 
 ローカル接続の準備は、対象のDev専用パスワードの利用が確認できた後、別途承認して行う。

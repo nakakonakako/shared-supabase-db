@@ -16,8 +16,6 @@ WORKFLOWS = {
     "dev-consumer-db-contract-check.yml": 1,
     "consumer-db-contract-check.yml": 1,
     "production-db-check.yml": 1,
-    "verify-dev-db-writer-connection.yml": 2,
-    "verify-production-db-writer-connection.yml": 2,
     "_apply-db-migrations.yml": 3,
 }
 

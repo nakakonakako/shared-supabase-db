@@ -12,9 +12,6 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 spec = importlib.util.spec_from_file_location('provision', ROOT / 'scripts/reset-dev-ai-quota-backend.py')
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
-diag_spec = importlib.util.spec_from_file_location('login_check', ROOT / 'scripts/verify-dev-ai-quota-backend-login.py')
-diag = importlib.util.module_from_spec(diag_spec)
-diag_spec.loader.exec_module(diag)
 
 if os.environ.get('AI_QUOTA_TEST_ALLOW_DISPOSABLE_DB') != 'YES' or os.environ.get('PGHOST') != '127.0.0.1' or os.environ.get('PGDATABASE') != 'ai_quota_test':
     raise SystemExit('Requires an explicitly opted-in dedicated loopback test cluster')
@@ -70,23 +67,5 @@ attempt(first, True)
 assert login(first) and not login(second)
 attempt(second, True)
 assert login(second) and not login(first)
-os.environ.update(root, PGUSER='ai_quota_backend', PGPASSWORD=second)
-diag.verify('dev')
-os.environ['PGPASSWORD'] = first
-try:
-    diag.verify('dev')
-except ValueError as error:
-    assert str(error) == 'connection_or_authentication'
-else:
-    raise AssertionError('invalid password accepted')
-os.environ['PGPASSWORD'] = second
-sql(root, "COMMENT ON DATABASE ai_quota_test IS 'wrong';")
-try:
-    diag.verify('dev')
-except ValueError as error:
-    assert str(error) == 'read_only_identity'
-else:
-    raise AssertionError('wrong database identity accepted')
-sql(root, "COMMENT ON DATABASE ai_quota_test IS 'shared-supabase-db:target=dev;project_ref=irgahixsuvtopiwmtkku';")
 sql(root, "DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members m JOIN pg_catalog.pg_roles r ON r.oid=m.member WHERE r.rolname='ai_quota_backend') OR pg_catalog.has_database_privilege('ai_quota_backend',current_database(),'CREATE') OR NOT has_schema_privilege('ai_quota_backend','ai_quota','USAGE') OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname='ai_quota_backend' AND (NOT rolcanlogin OR rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls OR rolinherit)) THEN RAISE EXCEPTION 'unexpected role attributes or privilege'; END IF; END $$;")
 print('PASS: non-superuser initial setup, reset, old/new authentication, denied privileges and identity')
