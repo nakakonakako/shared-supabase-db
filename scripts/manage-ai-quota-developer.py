@@ -45,8 +45,8 @@ def validated_inputs(env: dict[str, str]) -> tuple[str, str, str, str, str, str,
     if operation in {"preview", "audit"}:
         if expected:
             raise ValueError("expected fingerprint must be empty for preview")
-    elif not FINGERPRINT.fullmatch(expected):
-        raise ValueError("expected fingerprint is required")
+    elif expected and not FINGERPRINT.fullmatch(expected):
+        raise ValueError("invalid expected fingerprint")
     if not ACTOR.fullmatch(actor) or not re.fullmatch(r"[1-9][0-9]{0,17}", run_id):
         raise ValueError("invalid audit context")
     if operation == "audit":
@@ -80,6 +80,38 @@ def validate_connection(env: dict[str, str], target: str) -> None:
         raise ValueError("unsafe or mismatched admin DB configuration")
 
 
+PREVIEW_SQL = "BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout='15s'; SELECT ai_quota_admin.preview_developer(:'target'); COMMIT;\n"
+AUDIT_SQL = ("BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout='15s'; "
+             "SELECT operation || '|' || actor || '|' || before_fingerprint || '|' || after_fingerprint "
+             "FROM ai_quota_admin.audit_developer(:'target', :'audit_run_id'::bigint); COMMIT;\n")
+# Without a reviewed fingerprint, the current one is read inside the same statement.
+# change_developer still locks the row and rejects the change if it differs by then.
+CHANGE_SQL = ("BEGIN; SET LOCAL lock_timeout='3s'; SET LOCAL statement_timeout='15s'; "
+              "SELECT old_fingerprint || '|' || new_fingerprint FROM ai_quota_admin.change_developer("
+              ":'target', :'op', COALESCE(NULLIF(:'expected',''), ai_quota_admin.preview_developer(:'target')), "
+              "NULLIF(:'user_id','')::uuid, :'actor', :'run_id'::bigint); COMMIT;\n")
+
+
+def run_sql(psql: str, env: dict[str, str], variables: dict[str, str], sql: str) -> subprocess.CompletedProcess[str] | None:
+    args = [psql, "-X", "-w", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1"]
+    for key, value in variables.items():
+        args.extend(["-v", f"{key}={value}"])
+    try:
+        return subprocess.run(args, input=sql, capture_output=True, text=True, timeout=30, check=False, env=env)
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+
+
+def verify_change(psql: str, env: dict[str, str], variables: dict[str, str], before: str, after: str) -> bool:
+    """Read back the audit record of this run and the current value after COMMIT."""
+    audit = run_sql(psql, env, {**variables, "audit_run_id": variables["run_id"]}, AUDIT_SQL)
+    current = run_sql(psql, env, variables, PREVIEW_SQL)
+    if audit is None or current is None or audit.returncode != 0 or current.returncode != 0:
+        return False
+    return (audit.stdout.strip() == "|".join((variables["op"], variables["actor"], before, after))
+            and current.stdout.strip() == after)
+
+
 def main() -> int:
     env = dict(os.environ)
     try:
@@ -91,29 +123,17 @@ def main() -> int:
         return 2
     if env.get("ADMIN_PREFLIGHT") == "1":
         new_fingerprint = hashlib.sha256(new_id.encode("ascii")).hexdigest() if new_id else "none"
-        print(f"Target: {target}; operation: {op}; expected: {expected or 'not applicable'}; proposed: {new_fingerprint}; audit run: {audit_run_id or 'not applicable'}; run: {run_id}")
+        reviewed = expected or ("current value, read in the approved job" if op in {"set", "clear"} else "not applicable")
+        print(f"Target: {target}; operation: {op}; expected: {reviewed}; proposed: {new_fingerprint}; audit run: {audit_run_id or 'not applicable'}; run: {run_id}")
         return 0
     psql = shutil.which("psql")
     if not psql:
         print("admin operation: psql unavailable", file=sys.stderr)
         return 2
     variables = {"target": target, "op": op, "user_id": new_id, "expected": expected, "actor": actor, "run_id": run_id, "audit_run_id": audit_run_id}
-    args = [psql, "-X", "-w", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1"]
-    for key, value in variables.items():
-        args.extend(["-v", f"{key}={value}"])
-    if op == "preview":
-        sql = "BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout='15s'; SELECT ai_quota_admin.preview_developer(:'target'); COMMIT;\n"
-    elif op == "audit":
-        sql = ("BEGIN TRANSACTION READ ONLY; SET LOCAL statement_timeout='15s'; "
-               "SELECT operation || '|' || actor || '|' || before_fingerprint || '|' || after_fingerprint "
-               "FROM ai_quota_admin.audit_developer(:'target', :'audit_run_id'::bigint); COMMIT;\n")
-    else:
-        sql = ("BEGIN; SET LOCAL lock_timeout='3s'; SET LOCAL statement_timeout='15s'; "
-               "SELECT old_fingerprint || '|' || new_fingerprint FROM ai_quota_admin.change_developer("
-               ":'target', :'op', :'expected', NULLIF(:'user_id','')::uuid, :'actor', :'run_id'::bigint); COMMIT;\n")
-    try:
-        result = subprocess.run(args, input=sql, capture_output=True, text=True, timeout=30, check=False, env=env)
-    except (OSError, subprocess.SubprocessError, UnicodeError):
+    sql = PREVIEW_SQL if op == "preview" else AUDIT_SQL if op == "audit" else CHANGE_SQL
+    result = run_sql(psql, env, variables, sql)
+    if result is None:
         print("admin operation: execution failed or outcome unknown; do not retry without review", file=sys.stderr)
         return 2
     if result.returncode != 0:
@@ -125,7 +145,8 @@ def main() -> int:
         op == "audit" and (len(parts) != 4 or parts[0] not in {"set", "clear"} or not ACTOR.fullmatch(parts[1])
                            or not all(FINGERPRINT.fullmatch(p) for p in parts[2:]))
     ) or (
-        op in {"set", "clear"} and (len(parts) != 2 or not all(FINGERPRINT.fullmatch(p) for p in parts) or parts[0] != expected
+        op in {"set", "clear"} and (len(parts) != 2 or not all(FINGERPRINT.fullmatch(p) for p in parts)
+                             or (expected and parts[0] != expected)
                              or parts[1] != (hashlib.sha256(new_id.encode("ascii")).hexdigest() if new_id else "none"))
     ):
         print("admin operation: unexpected result; inspect state before any retry", file=sys.stderr)
@@ -135,7 +156,12 @@ def main() -> int:
     elif op == "audit":
         print(f"audit run: {audit_run_id}; operation: {parts[0]}; actor: {parts[1]}; before: {parts[2]}; after: {parts[3]}")
     else:
-        print(f"change committed; before fingerprint: {parts[0]}; after fingerprint: {parts[1]}; run: {run_id}")
+        print(f"change committed; before fingerprint: {parts[0]}; after fingerprint: {parts[1]}; run: {run_id}", flush=True)
+        if not verify_change(psql, env, variables, parts[0], parts[1]):
+            print("admin operation: change was committed but verification failed; do not retry; "
+                  "run audit with this run ID and preview", file=sys.stderr)
+            return 2
+        print(f"verified: audit record for run {run_id} (actor: {actor}) and current value match")
     return 0
 
 

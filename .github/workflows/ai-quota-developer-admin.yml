@@ -9,16 +9,16 @@ on:
         type: choice
         options: [dev, production]
       operation:
-        description: Preview, set, clear, or audit
+        description: set/clear verify themselves; preview/audit are for inspection
         required: true
         type: choice
         options: [preview, set, clear, audit]
       user_id:
-        description: Canonical Supabase UUID for set; empty for preview/clear
+        description: Canonical Supabase UUID for set; empty for other operations
         required: false
         type: string
       expected_fingerprint:
-        description: Preview fingerprint (or none); empty for preview
+        description: Optional for set/clear to require a reviewed preview value; empty for preview/audit
         required: false
         type: string
       audit_run_id:
@@ -111,4 +111,6 @@ jobs:
       - name: Verify PostgreSQL client
         run: python3 scripts/verify-psql-client.py
       - name: Run approved bounded operation
-        run: python3 scripts/manage-ai-quota-developer.py
+        run: |
+          set -euo pipefail
+          python3 scripts/manage-ai-quota-developer.py | tee -a "$GITHUB_STEP_SUMMARY"
