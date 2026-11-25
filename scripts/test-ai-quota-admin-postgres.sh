@@ -53,4 +53,30 @@ expect_denied "SELECT * FROM ai_quota_admin.change_developer('dev','clear','$FIN
 [[ "$(admin "SELECT changed FROM ai_quota_admin.change_developer('dev','clear','$FINGERPRINT',NULL,'tester',104)")" == t ]]
 [[ "$(admin "SELECT ai_quota_admin.preview_developer('dev')")" == none ]]
 [[ "$(psql "$DB" -X -Atqc 'SELECT count(*) FROM ai_quota_admin.operation_log')" == 2 ]]
-echo 'PASS: bounded admin role, account checks, audit, identity, stale/replay and Reader diagnostics'
+# End to end through the script: one invocation changes, audits and re-reads the value.
+script_run() {  # operation user_id expected run_id
+  ADMIN_DB_URL="$ADMIN_DB" ADMIN_OPERATION="$1" ADMIN_USER_ID="$2" ADMIN_EXPECTED="$3" GITHUB_RUN_ID="$4" \
+    GITHUB_ACTOR=tester DB_TARGET=dev python3 - <<'PY'
+import importlib.util, os, sys
+from pathlib import Path
+from urllib.parse import urlparse
+sys.path.insert(0, 'scripts')
+spec = importlib.util.spec_from_file_location('admin', Path('scripts/manage-ai-quota-developer.py'))
+admin = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(admin)
+url = urlparse(os.environ['ADMIN_DB_URL'])
+os.environ.update(PGHOST=url.hostname, PGPORT=str(url.port or 5432), PGUSER=url.username, PGDATABASE=url.path.lstrip('/'))
+admin.validate_connection = lambda env, target: None  # hosted-only guard; this cluster is disposable
+raise SystemExit(admin.main())
+PY
+}
+USER_A=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+script_run set "$USER_A" '' 105 | grep -q '^verified: audit record for run 105'
+[[ "$(admin "SELECT ai_quota_admin.preview_developer('dev')")" == "$FINGERPRINT" ]]
+if script_run clear '' none 106 >/dev/null 2>&1; then echo 'Expected stale fingerprint to fail' >&2; exit 1; fi
+if script_run clear '' '' 105 >/dev/null 2>&1; then echo 'Expected replayed run ID to fail' >&2; exit 1; fi
+[[ "$(admin "SELECT ai_quota_admin.preview_developer('dev')")" == "$FINGERPRINT" ]]
+script_run clear '' '' 107 | grep -q '^verified: audit record for run 107'
+[[ "$(admin "SELECT ai_quota_admin.preview_developer('dev')")" == none ]]
+[[ "$(psql "$DB" -X -Atqc 'SELECT count(*) FROM ai_quota_admin.operation_log')" == 4 ]]
+echo 'PASS: bounded admin role, account checks, audit, identity, stale/replay, one-run verification and Reader diagnostics'
