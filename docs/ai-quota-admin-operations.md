@@ -1,10 +1,10 @@
 # AI quota 開発者例外の管理
 
-この仕組みは `developer_user_id` の設定・解除専用。各操作は手動起動し、対象の既存 `development-db-apply` / `production-db-apply` Environment の承認を通る。migration apply workflow と資格情報は別であり、Writer enable flag は使わない。main の最新コミット、Environment の承認と main 限定、接続先 project ref、DB 内 identity marker を照合し、不一致なら停止する。例外は OCR の日次 user/global 上限と未知利用ブレーカーを除外し、緊急停止・同時実行・月次計測費用上限は維持する。対象ユーザーの OCR は日次集計にも含まれない。
+この仕組みは `developer_user_id` の設定・解除専用。各操作は手動起動し、対象の既存 `development-db-apply` / `production-db-apply` Environment の承認を通る。migration apply workflow と資格情報は別である。main の最新コミット、Environment の承認と main 限定、接続先 project ref、DB 内 identity marker を照合し、不一致なら停止する。例外は OCR の日次 user/global 上限と未知利用ブレーカーを除外し、緊急停止・同時実行・月次計測費用上限は維持する。対象ユーザーの OCR は日次集計にも含まれない。
 
 ## 前提と権限
 
-- この PR のマージは hosted DB を変更しないが、新 migration が未適用の間、shared inventory の `IN_SYNC` を必要とするアプリ配信 gate は停止する。Dev と本番の migration plan を別々に確認し、各環境の適用は別途明示承認する。Writer flag の有効化と復帰、適用、Reader postflight は既存の protected workflow に従う。
+- この PR のマージは hosted DB を変更しないが、新 migration が未適用の間、shared inventory の `IN_SYNC` を必要とするアプリ配信 gate は停止する。Dev と本番の migration plan を別々に確認し、各環境の適用は別途明示承認する。適用と Reader postflight は既存の protected workflow に従う。
 - migration は `ai_quota_admin_login` と NOLOGIN owner、固定関数、監査表を作る。ログインには関数実行権限だけを与え、設定表・監査表や Auth 表の直接権限は与えない。owner の設定表権限は必要な列に限る。Auth 妥当性のため postgres 所有の固定 `SECURITY DEFINER` 関数が限定照会する。一般 API ロールと backend に公開しない。
 - 新ログインのパスワードは migration で設定しない。適用後、各Environmentに専用Secret `DEV_AI_QUOTA_ADMIN_PASSWORD` / `PROD_AI_QUOTA_ADMIN_PASSWORD` を別途承認して登録し、`Provision AI quota admin password` をmainから手動実行する。英数字・ピリオド・アンダースコア・ハイフンのみ32〜128文字のランダム値を使う。入力・コマンド引数・ログに値を置かない。既存Writer Secretは専用bootstrap workflow内でのみ使用し、専用ログインには付与しない。
 - Environment の main 限定・必須レビュー・管理者バイパス無効を維持する。設定を変えず読み取り専用で確認する。workflow は保護が欠けると停止する。承認前に実行概要の target、operation、期待する現在値と新しい値の指紋を確認する。入力UUIDは Actions の実行入力に残るため、閲覧権限を制限する。
@@ -24,7 +24,7 @@
 
 Devと本番それぞれ同じ順序で独立に行う。各DB変更、Secret登録、例外設定はそれぞれ事前承認を得る。
 
-1. 対象環境のReader migration planを確認し、別途承認された既存Writer applyとReader postflightを完了し、Writer flagをfalseに戻す。失敗・不明・identity不一致なら停止する。
+1. 対象環境のReader migration planを確認し、別途承認された既存Writer applyとReader postflightを完了する。失敗・不明・identity不一致なら停止する。
 2. 対象の既存apply Environmentに、その環境専用の新しいSecretを安全に登録する。Secretの登録自体はEnvironmentレビューを発生させないため、事前に別途承認を得る。値は安全な管理経路で発行し、ログ・入力欄・シェル履歴に記録しない。
 3. `Provision AI quota admin password` をmainから対象を選び手動実行し、対象Environmentで承認する。workflowは最新main、Environment保護、Writer接続設定、同一接続でDB markerとpostgresのCREATEROLE・対象roleへのADMIN OPTION・対象role属性を検査する。libpqの `PQencryptPasswordConn` でSCRAM verifierを生成し、平文ではなくverifierを `ALTER ROLE` に渡す。DBログにverifierが残る可能性があり、verifierも機密としてDBログのアクセスを制限する。管理ロールや権限は追加しない。superuser以外には両権限が必要。新migrationでのロール作成者へのADMIN OPTIONはPostgreSQL 17の通常動作だが、hosted上では未確認であり、権限不足なら変更前に停止する。
 4. 同じworkflowが専用ログインによる別接続でパスワード認証とDB identityを確認する。失敗やタイムアウトは更新済みか不明として扱い、再試行しない。失敗時はSecretと対象環境、実行履歴を管理者が確認する。復旧の再設定には新たな承認が必要。以前のSecretを上書きした場合、以前の接続は使えなくなる可能性がある。

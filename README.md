@@ -44,13 +44,13 @@ SQLテスト接続先はloopbackに限定され、テストごとの専用デー
 
 ## Migration運用の入口
 
-通常の変更手順、Reader preflight、Writer enablement、Environment承認、Writer identity、Reader postflight、失敗時の復旧は[Migration Writer運用手順](docs/migration-writer-handoff.md)を参照する。hosted DBへの直接接続やローカル`supabase db push`は使わない。
+通常の変更手順、Reader preflight、Environment承認、Writer identity、Reader postflight、失敗時の復旧は[Migration Writer運用手順](docs/migration-writer-handoff.md)を参照する。hosted DBへの直接接続やローカル`supabase db push`は使わない。
 
 | 用途 | 手動workflow | 読み取り/書き込み | 判定と制約 |
 | --- | --- | --- | --- |
 | Dev migration計画 | `dev-migration-plan.yml` | Dev Reader only | shared inventory・identity・Reader権限・履歴を確認。連続prefixの`PENDING`は計画表示だけで適用しない |
 | Production migration計画 | `production-migration-plan.yml` | Production Reader only | shared inventory・identity・Reader権限・履歴を確認。`PENDING`のversionを表示し、適用しない |
-| Dev/Prod migration apply | `apply-dev-db-migrations.yml` / `apply-production-db-migrations.yml` | Reader preflight → 承認付きWriter → Reader postflight | `IN_SYNC`はno-op。連続prefixの`PENDING`のみ対象。Dev/Prod各enable flagが厳密に`true`の場合だけ適用 |
+| Dev/Prod migration apply | `apply-dev-db-migrations.yml` / `apply-production-db-migrations.yml` | Reader preflight → 承認付きWriter → Reader postflight | `IN_SYNC`はno-op。連続prefixの`PENDING`のみ対象。適用にはEnvironment承認が必要 |
 | Production DB check | `production-db-check.yml` | Production Reader only | history `IN_SYNC`、Reader/ACL/RPC/AI quota integrityを確認 |
 | アプリ本番deploy gate | receipt-manager / price-memo各`deploy.yml` | shared Production Reader | DB identity・shared history `IN_SYNC`・対象commitのアプリ契約を検証。適用しない |
 
@@ -98,8 +98,7 @@ shared側から固定SHAの両契約を検証するには`.github/workflows/cons
 ## 現在の状態と未完了作業
 
 - Dev/Prod Reader検証とWriter資格情報のread-only identity probeは成功済み。Dev passwordはローテーション済みで旧ローカルWriter passwordは削除済み
-- `DEV_DB_WRITER_ENABLED=false`、`PROD_DB_WRITER_ENABLED=false`。Dev migration historyは`IN_SYNC`
 - `development-db-apply`と`production-db-apply`はmain-only、Required reviewersあり、administrator bypass無効。これらのGitHub protection metadataは読み取り専用で確認済み
-- Dev/Prodのshared WriterによるPENDING migration実適用は未検証。Devの`IN_SYNC` workflow成功はno-opであり、適用能力の証拠にはならない
-- Prodへの実適用は別途の明示承認が必要。初回Dev/Prod applyも対象ごとの明示承認、enable flag切替、Environment reviewer承認、Reader postflightを必要とする
-- receipt-managerの旧Production Writer Secretは初回shared Production PENDING適用、Reader postflight、両アプリの互換性・本番配信成功、旧Writer参照経路の再監査後に別途承認して削除する。初回実適用前は削除しない
+- Dev/Prodともshared Writerによる`PENDING` migrationの実適用とReader postflightは成功済み（2026-11-23）
+- Prodへの実適用は毎回別途の明示承認、Environment reviewer承認、Reader postflightを必要とする
+- receipt-managerの旧Production Writer Secretは、両アプリの互換性・本番配信成功と旧Writer参照経路の再監査を確認し、別途承認して削除する

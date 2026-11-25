@@ -162,7 +162,7 @@ jobs:
 
 契約revisionはactionが`${{ github.sha }}`のアプリリポジトリから直接取得するため、sharedに格納した初期固定契約SHAをデプロイ判定には使わない。shared action/検証ロジックを変更した場合は、変更をmainへマージ後に両アプリの`uses`をその新しい完全commit SHAへ更新する。新migration追加だけの場合はaction SHA更新は不要で、毎回実行時に最新shared mainのmigration inventoryを固定取得する。実行中にshared mainが変わった場合はfail-closedとなり再実行が必要。
 
-このゲートはmigration履歴が厳密に`IN_SYNC`の場合しか通さない。そのためexpand/contract中にshared migrationが未適用ならアプリdeployも停止する。PENDING migrationは、shared-supabase-dbの手動・保護Writer workflowで別途適用し、Reader postflightが`IN_SYNC`になった後にアプリを配信する。このactionをmigration applyの代替として使用しない。両環境のWriterはread-only接続確認済みだが、Dev/ProdのPENDING migration実適用は未検証で、Writer enable flagはfalseのまま。
+このゲートはmigration履歴が厳密に`IN_SYNC`の場合しか通さない。そのためexpand/contract中にshared migrationが未適用ならアプリdeployも停止する。PENDING migrationは、shared-supabase-dbの手動・保護Writer workflowで別途適用し、Reader postflightが`IN_SYNC`になった後にアプリを配信する。このactionをmigration applyの代替として使用しない。Dev/ProdともPENDING migrationの実適用は成功済み（2026-11-23）。
 
 ## 他のActions連携方式
 
