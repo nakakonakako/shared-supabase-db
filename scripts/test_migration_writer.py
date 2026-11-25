@@ -18,8 +18,6 @@ ENV_CHECK = ROOT / "scripts/check-writer-environment.py"
 URL_WRITER = ROOT / "scripts/write-supabase-db-url.py"
 WORKFLOW_RESULT = ROOT / "scripts/evaluate-db-migration-workflow.py"
 IDENTITY_CHECK = ROOT / "scripts/verify-db-project-identity.py"
-DEV_WRITER_GATE = ROOT / "scripts/require-dev-writer-enabled.py"
-PROD_WRITER_GATE = ROOT / "scripts/require-production-writer-enabled.py"
 
 
 class MigrationWriterTests(unittest.TestCase):
@@ -95,7 +93,6 @@ class MigrationWriterTests(unittest.TestCase):
         secret: str = "do-not-log-secret",
         cli_capture: Path | None = None,
         target: str = "dev",
-        production_writer_enabled: str | None = None,
     ):
         fake_psql = self.bin / "psql"
         fake_psql.write_text(
@@ -116,10 +113,6 @@ class MigrationWriterTests(unittest.TestCase):
             "FAKE_HISTORY": remote,
             "SUPABASE_DB_URL": "postgresql://" + "writer" + ":" + secret + "@localhost/postgres",
         }
-        if production_writer_enabled is None:
-            env.pop("PROD_DB_WRITER_ENABLED", None)
-        else:
-            env["PROD_DB_WRITER_ENABLED"] = production_writer_enabled
         if cli_capture:
             env["FAKE_CLI_CAPTURE"] = str(cli_capture)
         return subprocess.run(
@@ -261,7 +254,7 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertIn("Supabase migration command failed", failed.stderr)
         self.assertNotIn("do-not-log-secret", failed.stdout + failed.stderr)
 
-    def test_production_pending_requires_exact_enablement_before_supabase_cli(self) -> None:
+    def test_production_pending_applies_without_an_enable_flag(self) -> None:
         marker = self.root / "production-cli-invoked"
         cli = self.bin / "production-supabase"
         cli.write_text(
@@ -271,31 +264,13 @@ class MigrationWriterTests(unittest.TestCase):
             encoding="utf-8",
         )
         cli.chmod(0o700)
-
-        for enabled in (None, "", "false", "TRUE", "yes"):
-            with self.subTest(enabled=enabled):
-                result = self._run_apply(
-                    "",
-                    cli,
-                    target="production",
-                    production_writer_enabled=enabled,
-                )
-                self.assertEqual(result.returncode, 2)
-                self.assertIn("Production Writer is disabled", result.stderr)
-                self.assertNotIn("do-not-log-secret", result.stdout + result.stderr)
-                self.assertFalse(marker.exists())
-
-        enabled = self._run_apply(
-            "",
-            cli,
-            target="production",
-            production_writer_enabled="true",
-        )
-        self.assertEqual(enabled.returncode, 0, enabled.stderr)
-        self.assertIn("pending migrations submitted", enabled.stdout)
+        result = self._run_apply("", cli, target="production")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pending migrations submitted", result.stdout)
+        self.assertNotIn("do-not-log-secret", result.stdout + result.stderr)
         self.assertTrue(marker.exists())
 
-    def test_production_in_sync_remains_a_safe_noop_while_writer_is_disabled(self) -> None:
+    def test_production_in_sync_remains_a_safe_noop(self) -> None:
         marker = self.root / "production-noop-cli-invoked"
         cli = self.bin / "production-must-not-run"
         cli.write_text(
@@ -310,29 +285,10 @@ class MigrationWriterTests(unittest.TestCase):
             "20260101000000\n",
             cli,
             target="production",
-            production_writer_enabled="false",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("IN_SYNC; safe no-op", result.stdout)
         self.assertFalse(marker.exists())
-
-    def test_production_writer_gate_is_strict_and_sanitized(self) -> None:
-        def check(value: str | None) -> subprocess.CompletedProcess[str]:
-            env = {**self.env}
-            if value is None:
-                env.pop("PROD_DB_WRITER_ENABLED", None)
-            else:
-                env["PROD_DB_WRITER_ENABLED"] = value
-            return subprocess.run(
-                [sys.executable, str(PROD_WRITER_GATE)], env=env, capture_output=True, text=True
-            )
-
-        self.assertEqual(check("true").returncode, 0)
-        for value in (None, "", "false", "TRUE", "yes"):
-            with self.subTest(value=value):
-                result = check(value)
-                self.assertEqual(result.returncode, 2)
-                self.assertIn("Production Writer is disabled", result.stderr)
 
     def test_in_sync_skips_supabase_cli_and_remote_only_fails_closed(self) -> None:
         marker = self.root / "cli-invoked"
@@ -520,22 +476,6 @@ class MigrationWriterTests(unittest.TestCase):
         ):
             self.assertNotEqual(failed.returncode, 0)
 
-    def test_dev_writer_gate_is_closed_until_explicit_cutover_enablement(self) -> None:
-        def check(value: str | None) -> subprocess.CompletedProcess[str]:
-            env = {**self.env}
-            if value is not None:
-                env["DEV_DB_WRITER_ENABLED"] = value
-            else:
-                env.pop("DEV_DB_WRITER_ENABLED", None)
-            return subprocess.run([sys.executable, str(DEV_WRITER_GATE)], env=env, capture_output=True, text=True)
-
-        self.assertEqual(check("true").returncode, 0)
-        for value in (None, "", "false", "TRUE", "yes"):
-            with self.subTest(value=value):
-                result = check(value)
-                self.assertEqual(result.returncode, 2)
-                self.assertIn("complete the documented cutover", result.stderr)
-
     def test_production_identity_probe_is_read_only_and_rejects_mismatch_or_auth_failure(self) -> None:
         fake_psql = self.bin / "psql"
         fake_psql.write_text(
@@ -705,14 +645,8 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertIn("scripts/apply-pending-migrations.py", reusable)
         self.assertIn("scripts/evaluate-db-migration-workflow.py", reusable)
         self.assertIn("scripts/verify-db-project-identity.py", reusable)
-        self.assertIn("scripts/require-dev-writer-enabled.py", reusable)
-        self.assertIn("scripts/require-production-writer-enabled.py", reusable)
-        self.assertIn("PROD_DB_WRITER_ENABLED: ${{ vars.PROD_DB_WRITER_ENABLED }}", reusable)
-        self.assertIn("if: inputs.target == 'production'", reusable)
-        self.assertLess(
-            reusable.index("Require explicit Production Writer handoff enablement"),
-            reusable.index("Recheck main and Writer target after Environment approval"),
-        )
+        self.assertNotIn("DB_WRITER_ENABLED", reusable)
+        self.assertNotIn("writer-enabled", reusable)
         self.assertIn("needs.preflight.outputs.state == 'IN_SYNC'", reusable)
         self.assertIn("needs.preflight.outputs.state == 'PENDING'", reusable)
         self.assertIn("needs.apply.result == 'failure'", reusable)
@@ -756,14 +690,6 @@ class MigrationWriterTests(unittest.TestCase):
             writer_job.index("Verify database-side project identity as Writer"),
             writer_job.index("Apply pending migrations or safely no-op"),
         )
-        self.assertLess(
-            writer_job.index("Require explicit Production Writer handoff enablement"),
-            writer_job.index("Apply pending migrations or safely no-op"),
-        )
-        self.assertIn(
-            "PROD_DB_WRITER_ENABLED: ${{ inputs.target == 'production' && vars.PROD_DB_WRITER_ENABLED || '' }}",
-            writer_job,
-        )
         postflight_job = reusable.split("\n  postflight:\n", 1)[1].split("\n  final-result:\n", 1)[0]
         self.assertLess(
             postflight_job.index("Verify database-side project identity as Reader"),
@@ -804,11 +730,6 @@ class MigrationWriterTests(unittest.TestCase):
         self.assertNotIn("secrets.DEV_MIGRATION_READER_PASSWORD", writer_job)
         self.assertNotIn("secrets.MIGRATION_READER_PASSWORD", writer_job)
 
-        self.assertIn("DEV_DB_WRITER_ENABLED: ${{ vars.DEV_DB_WRITER_ENABLED }}", reusable)
-        self.assertLess(
-            reusable.index("Require explicit Dev Writer handoff enablement"),
-            reusable.index("Verify database-side project identity as Writer"),
-        )
 
 
 if __name__ == "__main__":

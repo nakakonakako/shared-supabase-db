@@ -169,7 +169,6 @@ jobs:
       PGPASSWORD: ${{ (inputs.target == 'dev' && secrets.DEV_MIGRATION_SUPABASE_DB_PASSWORD) || (inputs.target == 'production' && secrets.MIGRATION_SUPABASE_DB_PASSWORD) || '' }}
       PGSSLMODE: require
       PGCONNECT_TIMEOUT: "10"
-      PROD_DB_WRITER_ENABLED: ${{ inputs.target == 'production' && vars.PROD_DB_WRITER_ENABLED || '' }}
     steps:
       - name: Checkout the dispatched main commit
         uses: actions/checkout@v4
@@ -180,16 +179,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Require explicit Dev Writer handoff enablement
-        if: inputs.target == 'dev'
-        env:
-          DEV_DB_WRITER_ENABLED: ${{ vars.DEV_DB_WRITER_ENABLED }}
-        run: python3 scripts/require-dev-writer-enabled.py
-      - name: Require explicit Production Writer handoff enablement
-        if: inputs.target == 'production'
-        env:
-          PROD_DB_WRITER_ENABLED: ${{ vars.PROD_DB_WRITER_ENABLED }}
-        run: python3 scripts/require-production-writer-enabled.py
       - name: Recheck main and Writer target after Environment approval
         run: |
           set -euo pipefail
