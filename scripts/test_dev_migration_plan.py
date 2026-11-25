@@ -9,8 +9,6 @@ from pathlib import Path
 from run_dev_migration_plan import evaluate_history_result
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github/workflows/dev-migration-plan.yml"
-PLAN_RUNNER = ROOT / "scripts/run_dev_migration_plan.py"
 
 
 class DevMigrationPlanTests(unittest.TestCase):
@@ -53,25 +51,6 @@ class DevMigrationPlanTests(unittest.TestCase):
         for result in invalid:
             with self.subTest(result=result):
                 self.assertEqual(evaluate_history_result(*result), ("ERROR", [], False))
-
-    def test_workflow_is_manual_main_only_reader_only_and_read_only(self) -> None:
-        source = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("workflow_dispatch:", source)
-        self.assertIn('GITHUB_REF" != refs/heads/main', source)
-        self.assertIn("permissions:\n  contents: read", source)
-        self.assertIn("name: development-db-check", source)
-        self.assertIn("secrets.DEV_MIGRATION_READER_PASSWORD", source)
-        self.assertNotIn("DEV_MIGRATION_SUPABASE_DB_PASSWORD", source)
-        self.assertNotIn("supabase db push", source)
-        self.assertIn("BEGIN TRANSACTION READ ONLY", (ROOT / "scripts/check-migration-history.py").read_text())
-        self.assertIn("check-migrations.py", source)
-        self.assertIn("verify-db-project-identity.py", source)
-        self.assertIn("verify_migration_preflight_reader.sql", source)
-        self.assertIn("run_dev_migration_plan.py", source)
-        self.assertLess(source.index("Validate migration immutability"), source.index("Verify Dev DB identity"))
-        self.assertLess(source.index("Verify Dev DB identity"), source.index("Classify shared migration history"))
-        self.assertIn("DB contract compatibility: not checked", PLAN_RUNNER.read_text(encoding="utf-8"))
-
 
 if __name__ == "__main__":
     unittest.main()

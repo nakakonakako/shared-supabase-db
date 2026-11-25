@@ -262,7 +262,7 @@ python3 "$plan_runner" --migrations-dir "$test_root/migrations" \
   --summary-file "$plan_summary"
 grep -Fq 'Migration history: **PENDING**' "$plan_summary"
 grep -Fq -- '- `20261028150000`' "$plan_summary"
-grep -Fq 'DB contract compatibility: not checked' "$plan_summary"
+grep -Fq 'DB contract compatibility: not part of' "$plan_summary"
 
 export PGUSER=postgres PGPASSWORD=disposable-postgres-password
 psql -X -w -v ON_ERROR_STOP=1 -c \

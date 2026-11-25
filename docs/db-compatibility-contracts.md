@@ -77,7 +77,7 @@ python3 scripts/check-db-contract.py path/to/contract.json
 
 `scripts/consumer_db_contracts.py`はGitHub公開Commit APIで指定SHAと応答の完全一致を確認し、その後`raw.githubusercontent.com/<repo>/<sha>/<path>`から取得する。トークンや追加Secretは使用しない。取得、SHA確認、UTF-8 JSON decode、v1形式、期待する`app_id`のいずれかが失敗した場合はDB照合へ進まない。契約ファイルはworkflow runnerの一時領域にだけ保存する。
 
-`.github/workflows/consumer-db-contract-check.yml`は`workflow_dispatch`専用でmainからのみ実行でき、最新main SHAを確認する。DB接続前のstepで両契約の取得と形式検証を完了し、既存`production-db-check` Environmentの`migration_preflight_login`資格情報を使って各契約を別々のread-only transactionで照合する。結果は契約ごとに`STATIC PASS`、`CONTRACT MISMATCH`、`EXECUTION ERROR`を出し、両方の成功時だけaggregateを成功とする。接続・出力形式・取得・形式の不明結果はfail-closed。migration履歴照合は既存のproduction workflowで独立して扱い、この契約workflowでは実施しない。
+`.github/workflows/db-check.yml`は`workflow_dispatch`専用でmainからのみ実行でき、最新main SHAを確認する。DB接続前のstepで両契約の取得と形式検証を完了し、`target`に対応するDB check Environmentの`migration_preflight_login`資格情報を使って各契約を別々のread-only transactionで照合する。結果は契約ごとに`STATIC PASS`、`CONTRACT MISMATCH`、`EXECUTION ERROR`を出し、両方の成功時だけaggregateを成功とする。接続・出力形式・取得・形式の不明結果はfail-closed。契約の判定は同じworkflowのmigration履歴判定とは別の結果として扱う。
 
 PR CIはホストDBやReader資格情報を利用しない。両アプリの契約PR・CIはアプリリポジトリ側の所有範囲とし、shared側workflowは明示された固定revisionのみを検証する。
 

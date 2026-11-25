@@ -6,11 +6,9 @@
 
 | 経路 | 用途 | DB権限 | migration適用 |
 | --- | --- | --- | --- |
-| shared `dev-migration-plan.yml` | Devのinventory、identity、Reader権限、履歴確認 | Dev Reader | しない。`IN_SYNC`または連続prefixの`PENDING`を報告 |
-| shared `production-migration-plan.yml` | Prodのinventory、identity、Reader権限、履歴確認 | Prod Reader | しない。`IN_SYNC`または連続prefixの`PENDING` versionを報告 |
+| shared `db-check.yml`（`target=dev` / `production`） | inventory、identity、Reader権限、履歴、両アプリ契約、`IN_SYNC`時のintegrity確認 | 対象のReader | しない。`IN_SYNC`または連続prefixの`PENDING` versionを報告 |
 | shared `apply-dev-db-migrations.yml` | Devへの承認済み適用 | Reader preflight、保護EnvironmentのWriter、Reader postflight | Environment承認後のPENDINGだけ |
 | shared `apply-production-db-migrations.yml` | Prodへの承認済み適用 | Reader preflight、保護EnvironmentのWriter、Reader postflight | Environment承認後のPENDINGだけ |
-| shared `production-db-check.yml` | Production Readerの権限・history・integrity確認 | Production Reader | しない。history `IN_SYNC`が必須 |
 | receipt-manager / price-memo `deploy.yml` | アプリ配信前のDB gate | Production Reader | しない。shared history `IN_SYNC`とアプリ契約PASSが必須 |
 
 `IN_SYNC`ではWriter workflowはCLIを呼ばず安全なno-opを行う。`PENDING`はshared migration履歴の連続prefixである場合に限りapply候補となる。`REMOTE_ONLY`、`ERROR`、接続・診断・契約エラーは停止する。PENDINGの適用には対象Environmentのreviewer承認が必要。アプリのpushやdeployはmigrationを自動適用しない。
@@ -45,8 +43,8 @@ Writer workflowはPostgreSQL `postgres` databaseのcommentを読み、コード�
 
 ### 2. 対象環境のReader preflightを行う
 
-1. mainの最新commitを対象に、Devは`dev-migration-plan.yml`と`dev-consumer-db-contract-check.yml`、Prodは`production-migration-plan.yml`と`consumer-db-contract-check.yml`を手動実行する。Prod historyがすでに`IN_SYNC`なら`production-db-check.yml`も実行できる。workflow runは同じcommit SHAで記録する。
-2. migration planでDB identity、最小Reader権限、shared inventory/checksum、履歴を確認する。consumer contract checkで両アプリ契約を確認する。RPC/AI quota/ACL integrityは`production-db-check.yml`とapply後のpostflightで確認し、Writer identityは承認後のapply jobが適用前に照合する。履歴planはmigration一覧を提示するだけで、Writer applyではない。
+1. mainの最新commitを対象に、`db-check.yml`を対象の`target`で手動実行する。workflow runのcommit SHAを記録する。
+2. DB identity、最小Reader権限、shared inventory/checksum、履歴、両アプリ契約を確認する。integrityは`IN_SYNC`のときだけ実行され、`PENDING`の場合はapply後のpostflightで確認する。Writer identityは承認後のapply jobが適用前に照合する。この確認はmigration一覧を提示するだけで、Writer applyではない。
 3. apply候補がある場合はplan/checkerの`PENDING`一覧がshared migrationの連続prefixであることをレビューする。`REMOTE_ONLY`、`ERROR`、診断不一致、契約不一致、接続失敗は停止する。
 
 ### 3. Writer applyを手動実行・承認する

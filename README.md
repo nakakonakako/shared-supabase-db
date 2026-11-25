@@ -48,19 +48,17 @@ SQLテスト接続先はloopbackに限定され、テストごとの専用デー
 
 | 用途 | 手動workflow | 読み取り/書き込み | 判定と制約 |
 | --- | --- | --- | --- |
-| Dev migration計画 | `dev-migration-plan.yml` | Dev Reader only | shared inventory・identity・Reader権限・履歴を確認。連続prefixの`PENDING`は計画表示だけで適用しない |
-| Production migration計画 | `production-migration-plan.yml` | Production Reader only | shared inventory・identity・Reader権限・履歴を確認。`PENDING`のversionを表示し、適用しない |
+| Dev/Prod DB確認 | `db-check.yml`（`target`で選択） | 対象のReader only | inventory・identity・Reader権限・履歴・両アプリ契約を確認。`IN_SYNC`のときは対象のintegrityも確認。連続prefixの`PENDING`はversion表示だけで適用せず、integrityは省略 |
 | Dev/Prod migration apply | `apply-dev-db-migrations.yml` / `apply-production-db-migrations.yml` | Reader preflight → 承認付きWriter → Reader postflight | `IN_SYNC`はno-op。連続prefixの`PENDING`のみ対象。適用にはEnvironment承認が必要 |
-| Production DB check | `production-db-check.yml` | Production Reader only | history `IN_SYNC`、Reader/ACL/RPC/AI quota integrityを確認 |
 | アプリ本番deploy gate | receipt-manager / price-memo各`deploy.yml` | shared Production Reader | DB identity・shared history `IN_SYNC`・対象commitのアプリ契約を検証。適用しない |
 
 DevとProdは独立して計画・承認・実行する。一方の履歴状態を他方へ流用しない。
 
-## 本番DB読み取り専用検証ゲート
+## DB読み取り専用検証
 
-`.github/workflows/production-db-check.yml`は`workflow_dispatch`専用で、mainからの実行だけを受け付ける。実行時にdispatch refと最新main SHAを確認し、履歴が`IN_SYNC`であること、Readerの最小権限、Reader bootstrap、RPC、AI quota、ACLの整合性を読み取り専用SQLで検査する。接続・履歴・診断エラーはすべて失敗扱い。PR CIからは本番へ接続せず、workflowはmigration適用や書き込みを行わない。
+`.github/workflows/db-check.yml`は`workflow_dispatch`専用で、mainからの実行だけを受け付ける。`target`（`dev` / `production`）に対応する`development-db-check` / `production-db-check` Environmentと、そのReader資格情報だけを使う。最新main SHA、migrationの不変性とchecksum、固定SHAの両アプリ契約の形式を確認してから接続し、DB identity、Readerの最小権限、Reader bootstrap、migration履歴、両アプリ契約を検査する。履歴が`IN_SYNC`のときは、ProdではRPC・AI quota・ACL、DevではAI quotaと管理roleのintegrityも検査する。`PENDING`は成功扱いでintegrityを省略し、job summaryに明記する。`REMOTE_ONLY`、`ERROR`、接続・診断・契約エラーは失敗扱い。`IN_SYNC`の確認が必要な場合はjob summaryの履歴結果を確認する。PR CIからはhosted DBへ接続せず、workflowはmigration適用や書き込みを行わない。
 
-workflowはEnvironmentや資格情報を作成・変更しない。手動実行前にGitHub Settingsで`production-db-check`が存在し、Deployment branchesが`main`だけに制限され、以下の既存設定が正しいことを確認する。
+workflowはEnvironmentや資格情報を作成・変更しない。手動実行前にGitHub Settingsで対象のEnvironmentが存在し、Deployment branchesが`main`だけに制限され、以下の既存設定（Prodの場合）が正しいことを確認する。Devの設定名は[Dev DB契約検証の事前設定](docs/dev-db-contract-reader-bootstrap.md)を参照。
 
 1. Environment Variables
    - `PROD_SUPABASE_POOLER_HOST`: ProdプロジェクトのConnect画面からコピーしたSession Poolerのhostのみ（URL・portなし）
@@ -74,9 +72,9 @@ workflowはSession Poolerのhost形式と、Reader専用username、port `5432`�
 
 Environment未設定、変数・secret欠落、main以外からのdispatch、最新main SHAとの不一致ではDB接続前に停止する。Writer用SecretやGitHub Settingsの変更はこのworkflowに含めない。
 
-## Dev DB契約検証ゲート
+## Dev DB確認の事前設定
 
-`.github/workflows/dev-consumer-db-contract-check.yml`はDev専用の手動・読み取り専用workflow。両アプリの固定SHA契約をDB接続前に検証し、Dev専用Readerでcatalogを照合する。Dev Environment/LOGINの現状確認と、未整備時のbootstrap手順は[Dev DB契約検証の事前設定](docs/dev-db-contract-reader-bootstrap.md)を参照。EnvironmentやLOGINはworkflowから作成・変更しない。
+Dev Environment/LOGINの現状確認と、未整備時のbootstrap手順は[Dev DB契約検証の事前設定](docs/dev-db-contract-reader-bootstrap.md)を参照。EnvironmentやLOGINはworkflowから作成・変更しない。
 
 ## アプリDB互換性契約
 
@@ -87,9 +85,9 @@ python3 scripts/check-db-contract.py scripts/fixtures/db-contract-v1.example.jso
 python3 scripts/check-db-contract.py path/to/consumer-owned-contract.json
 ```
 
-shared側から固定SHAの両契約を検証するには`.github/workflows/consumer-db-contract-check.yml`をmainから手動実行する。このworkflowは公開GitHub API/raw URLから契約を取得し、DB接続前に両方の形式を検証してから既存Reader資格情報で照合する。PR CIや通常の`npm run check`はホストDBへ接続しない。
+shared側から固定SHAの両契約を検証するには`.github/workflows/db-check.yml`をmainから手動実行する。このworkflowは公開GitHub API/raw URLから契約を取得し、DB接続前に両方の形式を検証してから既存Reader資格情報で照合する。PR CIや通常の`npm run check`はホストDBへ接続しない。
 
-カタログ照合に業務テーブル行のSELECTは不要。成功表示はカタログ上の静的検査のみを意味し、RLS実動作・Authユーザー間分離・RPC結果・Realtime配信を保証しない。migration履歴の一致確認は既存の本番Reader workflowで独立して行う。
+カタログ照合に業務テーブル行のSELECTは不要。成功表示はカタログ上の静的検査のみを意味し、RLS実動作・Authユーザー間分離・RPC結果・Realtime配信を保証しない。契約の判定とmigration履歴の判定は、同じworkflow内の別の結果として扱う。
 
 ## Migrationの不変性
 

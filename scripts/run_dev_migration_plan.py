@@ -61,7 +61,7 @@ def write_summary(
         raise ValueError("unsupported migration plan target")
     lines = [
         f"- Migration history: **{state}**",
-        f"- DB contract compatibility: not checked by this workflow; run the separate {target_label} consumer contract check",
+        f"- DB contract compatibility: not part of the {target_label} history result; see the contract verification step",
     ]
     if state == "PENDING":
         lines.extend(["", "### Pending migration versions", "", *[f"- `{version}`" for version in pending]])
@@ -77,6 +77,7 @@ def main() -> int:
     parser.add_argument("--base-ref", help="also validate migration immutability against this ref")
     parser.add_argument("--summary-file", type=Path, help="append a GitHub Actions job summary")
     parser.add_argument("--target", choices=("dev", "production"), default="dev")
+    parser.add_argument("--state-output", type=Path, help="append state=<result> for later workflow steps")
     args = parser.parse_args()
 
     checker = Path(__file__).with_name("check-migration-history.py")
@@ -124,6 +125,9 @@ def main() -> int:
 
     try:
         write_summary(args.summary_file, state, pending, args.target)
+        if args.state_output:
+            with args.state_output.open("a", encoding="utf-8") as stream:
+                stream.write(f"state={state}\n")
     except OSError:
         print("Migration plan summary could not be written", file=sys.stderr)
         return 1
